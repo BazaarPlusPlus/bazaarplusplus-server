@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { handleQueryGhostBattles } from "./features/ghostBattles/query";
+import { handleCreateReplayLink } from "./features/ghostBattles/replayLink";
 import { handleUploadRunBundle } from "./features/runBundles/upload";
 import { preflight, withCors } from "./http/cors";
 import { json, jsonError } from "./http/json";
@@ -25,6 +26,15 @@ export default {
         (r) => r.method === request.method && r.path === url.pathname,
       );
       if (route) return withCors(request, await route.handle(request, env));
+
+      const replayLinkMatch = url.pathname.match(/^\/ghost-battles\/([^/]+)\/replay-link$/);
+      if (request.method === "POST" && replayLinkMatch) {
+        return withCors(
+          request,
+          await handleCreateReplayLink(request, env, decodeURIComponent(replayLinkMatch[1] ?? "")),
+        );
+      }
+
       return withCors(request, jsonError("not_found", 404));
     } catch (error) {
       if (error instanceof Response) return withCors(request, error);
