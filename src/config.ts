@@ -1,0 +1,1 @@
+export const GHOST_QUERY_LOOKBACK_DAYS = 5;
