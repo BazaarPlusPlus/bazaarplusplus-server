@@ -57,10 +57,21 @@ export async function handleUploadRunBundle(
     `run-bundles/${playerKeySegment}/${runKeySegment}/${toBase64Url(payloadHash)}.mpack.gz`;
 
   const r2Start = Date.now();
-  await env.RUN_BUNDLE_BUCKET.put(objectKey, outer.artifact_bytes.bytes, {
-    httpMetadata: { contentType: outer.artifact_codec },
-  });
-  const r2PutMs = Date.now() - r2Start;
+  let r2PutMs: number;
+  try {
+    await env.RUN_BUNDLE_BUCKET.put(objectKey, outer.artifact_bytes.bytes, {
+      httpMetadata: { contentType: outer.artifact_codec },
+    });
+    r2PutMs = Date.now() - r2Start;
+  } catch (error) {
+    logWarn("run_bundles.upload", {
+      run_id: inner.run_id,
+      object_key: objectKey,
+      error: String(error),
+      outcome: "r2_put_failed",
+    });
+    throw error;
+  }
 
   const nowUtc = new Date().toISOString();
 
@@ -131,17 +142,19 @@ export async function handleUploadRunBundle(
     // D1 failed after R2 put — best-effort cleanup so we don't leak an orphan.
     try {
       await env.RUN_BUNDLE_BUCKET.delete(objectKey);
-      logWarn("run_bundles.upload.d1_failed_r2_cleaned", {
+      logWarn("run_bundles.upload", {
         run_id: inner.run_id,
         object_key: objectKey,
         error: String(error),
+        outcome: "d1_batch_failed_r2_cleaned",
       });
     } catch (cleanupError) {
-      logWarn("run_bundles.upload.d1_failed_r2_orphaned", {
+      logWarn("run_bundles.upload", {
         run_id: inner.run_id,
         object_key: objectKey,
         error: String(error),
         cleanup_error: String(cleanupError),
+        outcome: "d1_batch_failed_r2_orphaned",
       });
     }
     throw error;
