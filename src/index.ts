@@ -29,10 +29,13 @@ export default {
 
       const replayLinkMatch = url.pathname.match(/^\/ghost-battles\/([^/]+)\/replay-link$/);
       if (request.method === "POST" && replayLinkMatch) {
-        return withCors(
-          request,
-          await handleCreateReplayLink(request, env, decodeURIComponent(replayLinkMatch[1] ?? "")),
-        );
+        let battleId: string;
+        try {
+          battleId = decodeURIComponent(replayLinkMatch[1] ?? "");
+        } catch {
+          return withCors(request, jsonError("bad_request", 400));
+        }
+        return withCors(request, await handleCreateReplayLink(request, env, battleId));
       }
 
       return withCors(request, jsonError("not_found", 404));
