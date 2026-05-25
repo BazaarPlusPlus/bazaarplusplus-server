@@ -1,0 +1,30 @@
+name = "bazaarplusplus-mod-api-v4"
+main = "src/index.ts"
+compatibility_date = "2026-03-28"
+workers_dev = false
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1.0
+
+[[routes]]
+pattern = "mod-api-v4.bazaarplusplus.com"
+custom_domain = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bazaarplusplus-mod-api-v4-db"
+database_id = "PROVISION_AT_PHASE_3"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "RUN_BUNDLE_BUCKET"
+bucket_name = "bazaarplusplus-run-bundles-v4"
+
+[[r2_buckets]]
+binding = "BAZAARDB_BUCKET"
+bucket_name = "bazaarplusplus-bazaardb-assets-v4"
