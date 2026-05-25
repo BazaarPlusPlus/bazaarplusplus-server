@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { handleGetBazaarDbManifest } from "./features/bazaardb/manifest";
 import { handleUploadBazaarDbScreenshot } from "./features/bazaardb/upload";
 import { handleQueryGhostBattles } from "./features/ghostBattles/query";
 import { handleCreateReplayLink } from "./features/ghostBattles/replayLink";
@@ -17,6 +18,7 @@ const StaticRoutes: StaticRoute[] = [
   { method: "POST", path: "/run-bundles", handle: handleUploadRunBundle },
   { method: "GET", path: "/ghost-battles", handle: handleQueryGhostBattles },
   { method: "POST", path: "/bazaardb-screenshots", handle: handleUploadBazaarDbScreenshot },
+  { method: "GET", path: "/bazaardb/manifest", handle: handleGetBazaarDbManifest },
 ];
 
 export default {
