@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { handleQueryGhostBattles } from "./features/ghostBattles/query";
 import { handleUploadRunBundle } from "./features/runBundles/upload";
 import { preflight, withCors } from "./http/cors";
 import { json, jsonError } from "./http/json";
@@ -12,6 +13,7 @@ type StaticRoute = {
 const StaticRoutes: StaticRoute[] = [
   { method: "GET", path: "/health", handle: () => json({ ok: true }) },
   { method: "POST", path: "/run-bundles", handle: handleUploadRunBundle },
+  { method: "GET", path: "/ghost-battles", handle: handleQueryGhostBattles },
 ];
 
 export default {
