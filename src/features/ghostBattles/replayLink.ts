@@ -4,6 +4,7 @@ import { json, jsonError } from "../../http/json";
 import { logInfo } from "../../observability";
 
 const ReplayTtlSeconds = 300;
+const RunBundleBucketName = "bazaarplusplus-run-bundles-v4";
 
 export async function handleCreateReplayLink(
   _request: Request,
@@ -34,7 +35,7 @@ export async function handleCreateReplayLink(
     return jsonError("artifact_expired", 410);
   }
 
-  const presigner = createR2Presigner(env);
+  const presigner = createR2Presigner(env, RunBundleBucketName);
   const { url, expiresAtUtc } = await presigner.sign(row.object_key, ReplayTtlSeconds);
 
   logInfo("ghost_battles.replay_link", {

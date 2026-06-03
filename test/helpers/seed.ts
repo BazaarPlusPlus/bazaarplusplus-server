@@ -8,7 +8,7 @@ export async function resetTestState(env: {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM battles"),
     env.DB.prepare("DELETE FROM runs"),
-    env.DB.prepare("DELETE FROM bazaardb_screenshots"),
+    env.DB.prepare("DELETE FROM bazaardb_delivery"),
   ]);
   for (const bucket of [env.RUN_BUNDLE_BUCKET, env.BAZAARDB_BUCKET]) {
     const list = await bucket.list();
@@ -28,7 +28,7 @@ export async function selectFirst<T>(
 
 export async function countRows(
   db: D1Database,
-  table: "runs" | "battles" | "bazaardb_screenshots",
+  table: "runs" | "battles" | "bazaardb_delivery",
 ): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>();
   return row?.n ?? 0;

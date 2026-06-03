@@ -13,8 +13,8 @@ export function json(data: unknown, init?: ResponseInit): Response {
  * Use this instead of `json({ error: "..." }, { status })` so the wire shape
  * stays consistent across handlers.
  *
- * Note: uploadBazaarDbScreenshot intentionally returns `{status:"rejected",reason}`
- * — that shape is fixed by the mod-side ingest contract, not a drift.
+ * Upload handlers that need a distinct wire contract should still use this helper
+ * for canonical `{"error":"<code>"}` failures unless their API doc says otherwise.
  */
 export function jsonError(errorCode: string, status = 400): Response {
   return json({ error: errorCode }, { status });

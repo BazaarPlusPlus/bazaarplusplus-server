@@ -23,6 +23,12 @@ function payload(opts: {
     battle_id: string;
     opponent_account_id: string | null;
     is_final_battle: boolean;
+    player_prestige?: number;
+    player_victories?: number;
+    opponent_prestige?: number;
+    opponent_victories?: number;
+    winner_combatant_id?: string;
+    loser_combatant_id?: string;
   }>;
 }): unknown {
   return {
@@ -43,9 +49,17 @@ function payload(opts: {
       day: 5,
       player_name: opts.uploader,
       player_account_id: opts.uploader,
+      player_level: 7,
+      player_prestige: b.player_prestige ?? 2,
+      player_victories: b.player_victories ?? 9,
       opponent_name: b.opponent_account_id ?? "Unknown",
       opponent_account_id: b.opponent_account_id,
+      opponent_level: 8,
+      opponent_prestige: b.opponent_prestige ?? 3,
+      opponent_victories: b.opponent_victories ?? 10,
       result: "Won",
+      winner_combatant_id: b.winner_combatant_id ?? "player-combatant",
+      loser_combatant_id: b.loser_combatant_id ?? "opponent-combatant",
       is_final_battle: b.is_final_battle,
     })),
   };
@@ -83,6 +97,58 @@ test("battles are projected with opponent account metadata", async () => {
   );
   expect(response.status).toBe(200);
   expect(await countRows(env.DB, "battles")).toBe(1);
+});
+
+test("battles project participant prestige, victories, and winner/loser ids", async () => {
+  const response = await worker.fetch(
+    buildUpload(payload({
+      runId: "run-rich-battle",
+      uploader: "uploader-1",
+      battles: [
+        {
+          battle_id: "b-rich",
+          opponent_account_id: "known-opponent",
+          is_final_battle: true,
+          player_prestige: 4,
+          player_victories: 11,
+          opponent_prestige: 5,
+          opponent_victories: 12,
+          winner_combatant_id: "winner-1",
+          loser_combatant_id: "loser-1",
+        },
+      ],
+    })),
+    env,
+  );
+  expect(response.status).toBe(200);
+
+  const row = await selectFirst<{
+    player_prestige: number | null;
+    player_victories: number | null;
+    opponent_prestige: number | null;
+    opponent_victories: number | null;
+    winner_combatant_id: string | null;
+    loser_combatant_id: string | null;
+  }>(
+    env.DB,
+    `
+      SELECT
+        player_prestige, player_victories,
+        opponent_prestige, opponent_victories,
+        winner_combatant_id, loser_combatant_id
+      FROM battles
+      WHERE battle_id = ?
+    `,
+    ["b-rich"],
+  );
+  expect(row).toEqual({
+    player_prestige: 4,
+    player_victories: 11,
+    opponent_prestige: 5,
+    opponent_victories: 12,
+    winner_combatant_id: "winner-1",
+    loser_combatant_id: "loser-1",
+  });
 });
 
 test("self-battle: opponent == uploader → projected", async () => {

@@ -1,7 +1,7 @@
 # V4 API Reference
 
 **Host:** `mod-api-v4.bazaarplusplus.com`
-**Auth model:** No token auth for mod-facing endpoints. `GET /bazaardb/manifest` requires a bearer token. All `player_account_id` fields are required; no sentinel fallbacks accepted.
+**Auth model:** No token auth for mod-facing endpoints. `POST /bazaardb/peek` and `POST /bazaardb/confirm` require a bearer token. All `player_account_id` fields are required; no sentinel fallbacks accepted.
 **Error shape:** `{ "error": "<code>" }` unless noted otherwise.
 **CORS:** All endpoints accept preflight (`OPTIONS`).
 
@@ -75,13 +75,19 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 | `player_rank` | string | |
 | `player_rating` | number | |
 | `player_level` | number | |
+| `player_prestige` | number | |
+| `player_victories` | number | |
 | `opponent_name` | string | |
 | `opponent_account_id` | string | nullable; every valid battle projection is written regardless of opponent account |
 | `opponent_hero` | string | |
 | `opponent_rank` | string | |
 | `opponent_rating` | number | |
 | `opponent_level` | number | |
+| `opponent_prestige` | number | |
+| `opponent_victories` | number | |
 | `result` | string | |
+| `winner_combatant_id` | string | |
+| `loser_combatant_id` | string | |
 | `is_final_battle` | boolean | upsert uses sticky MAX — once true, never reverts |
 
 ### Response 200 (accepted)
@@ -143,13 +149,19 @@ Query battles where the given player was the opponent. Returns battles recorded 
       "player_rank": "string | null",
       "player_rating": "number | null",
       "player_level": "number | null",
+      "player_prestige": "number | null",
+      "player_victories": "number | null",
       "opponent_name": "string | null",
       "opponent_account_id": "string | null",
       "opponent_hero": "string | null",
       "opponent_rank": "string | null",
       "opponent_rating": "number | null",
       "opponent_level": "number | null",
+      "opponent_prestige": "number | null",
+      "opponent_victories": "number | null",
       "result": "string | null",
+      "winner_combatant_id": "string | null",
+      "loser_combatant_id": "string | null",
       "is_final_battle": "boolean"
     }
   ]
@@ -216,136 +228,176 @@ No request body.
 
 ---
 
-## POST /bazaardb-screenshots
+## POST /bazaardb/snapshots/:snapshot_id
 
-Upload a BazaarDB screenshot and its metadata. R2 put happens before D1 insert; D1 failure triggers best-effort R2 cleanup.
+Upload one BazaarDB snapshot DTO. The body is stored as opaque JSON bytes: the server does not parse the DTO, decode image bytes, calculate a hash, or write metadata columns.
 
-**Auth:** None. `player_account_id` required in body.
+**Auth:** None.
 
-### Request body (JSON)
+### Path parameter
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `schema_version` | number | yes | must equal `1`; other values → 400 `unsupported_schema_version` |
-| `submitted_at_utc` | string | yes | |
-| `player_account_id` | string | yes | |
-| `screenshot_id` | string | yes | must be a safe URL/key segment |
-| `captured_at_utc` | string | yes | parsed as ISO datetime; must not be more than 24h in the future |
-| `image_format` | string | yes | must be `"png"` |
-| `image_bytes_base64` | string | yes | base64-encoded PNG bytes; max 2 MB |
-| `run_id` | string | no | |
-| `hero_name` | string | no | |
-| `final_days` | number | no | |
-| `final_victories` | number | no | |
-| `player_name` | string | no | |
-| `player_rank` | string | no | |
-| `player_rating` | number | no | |
-| `player_position` | number | no | |
+| Param | Type | Notes |
+|---|---|---|
+| `:snapshot_id` | string | must match `^[A-Za-z0-9._-]{1,128}$`; malformed percent-encoding or unsafe decoded id → 400 `invalid_snapshot_id` |
 
-### Response 200 (accepted)
+### Request body
+
+`Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. Max body size is 4 MiB. Empty bodies are rejected.
+
+Example shape:
 
 ```json
 {
-  "status": "ok",
-  "screenshot_id": "string",
-  "uploaded_at_utc": "string"
+  "schema_version": 2,
+  "snapshot": {
+    "id": "snapshot-id",
+    "source": "end_of_run_auto",
+    "captured_at_utc": "2026-06-03T12:34:56.000Z"
+  },
+  "player": {
+    "account_id": "player-account-id",
+    "display_name": "Player",
+    "rank": "Gold",
+    "rating": 1234,
+    "leaderboard_position": 12
+  },
+  "run": {
+    "id": "run-id",
+    "day": 10,
+    "wins": 9,
+    "losses": null,
+    "hero": { "id": null, "name": "Vanessa" }
+  },
+  "image": {
+    "content_type": "image/png",
+    "encoding": "base64",
+    "data_base64": "..."
+  },
+  "client": {
+    "submitted_at_utc": "2026-06-03T12:35:00.000Z"
+  }
 }
 ```
-
-`uploaded_at_utc` is the server time at which the D1 row was written.
-
-### Rejected (validation failure, 400)
-
-```json
-{ "status": "rejected", "reason": "<code>" }
-```
-
-| `reason` | Condition |
-|---|---|
-| `unsupported_schema_version` | `schema_version` != 1 |
-| `missing_required_field` | Any of `submitted_at_utc`, `player_account_id`, `screenshot_id`, `captured_at_utc`, `image_format`, `image_bytes_base64` missing or null |
-| `invalid_screenshot_id` | `screenshot_id` contains characters unsafe for R2 keys / URLs |
-| `unsupported_image_format` | `image_format` is not `"png"` |
-| `invalid_captured_at_utc` | `captured_at_utc` does not parse as a valid datetime, or is more than 24h in the future |
-| `invalid_image_bytes_base64` | `image_bytes_base64` is not valid base64 |
-| `image_too_large` | Decoded image exceeds 2 MB |
-| `image_bytes_not_png` | Decoded bytes are empty or do not match PNG magic bytes |
-
-### Error (server failure, 500)
-
-```json
-{ "status": "error", "reason": "db_upsert_failed" }
-```
-
-### V3 → V4 deltas
-
-- `player_account_id` no longer accepts `"anonymous-player"` sentinel; mod must skip upload if account id is unavailable.
-- R2 key shape changed: `bazaardb/<captured_date_utc>/<screenshot_id>.png` (V3: `bazaardb/screenshots/<date>/<id>.png`).
-- Upsert on `screenshot_id` conflict updates `uploaded_at_utc`, `image_sha256`, `image_bytes`, `r2_key`.
-
----
-
-## GET /bazaardb/manifest
-
-Cursor-paginated daily manifest of BazaarDB screenshots. Each row includes a stable public image URL pointing to the public R2 bucket; images are served directly without going through the Worker.
-
-**Auth:** `Authorization: Bearer <BAZAARDB_PULL_TOKEN>` required. Missing or wrong token → 401 (no body).
-
-### Query parameters
-
-| Param | Type | Required | Notes |
-|---|---|---|---|
-| `date` | string | yes | `YYYY-MM-DD` format; invalid → 400 `invalid_date` |
-| `cursor` | string | no | base64(`<uploaded_at_utc>:<screenshot_id>`); omit for first page; malformed → 400 `invalid_cursor` |
-| `limit` | integer | no | default 200; clamped to 1–500 |
 
 ### Response 200
 
 ```json
 {
-  "rows": [
-    {
-      "screenshot_id": "string",
-      "player_account_id": "string",
-      "run_id": "string | null",
-      "hero_name": "string | null",
-      "final_days": "number | null",
-      "final_victories": "number | null",
-      "player_name": "string | null",
-      "player_rank": "string | null",
-      "player_rating": "number | null",
-      "player_position": "number | null",
-      "captured_at_utc": "string",
-      "image_format": "string",
-      "image_sha256": "string",
-      "image_bytes": "number",
-      "image_url": "string"
-    }
-  ],
-  "next_cursor": "string | null"
+  "status": "ok",
+  "snapshot_id": "string",
+  "uploaded_at_utc": "string"
 }
 ```
 
-`image_url` = `https://bazaardb-assets-v4.bazaarplusplus.com/<encodeURI(r2_key)>`
+Re-uploading an existing `snapshot_id` is a no-op for every state (`pending`, leased, `done`, `failed`): the server returns 200 and does not replace or revive the existing row/object.
 
-`next_cursor` is non-null when `rows.length == limit`; null on the last page.
+### Errors
 
-Rows ordered by `(uploaded_at_utc ASC, screenshot_id ASC)`.
+| Status | `error` code | Condition |
+|---|---|---|
+| 400 | `invalid_snapshot_id` | Decoded path id is not a safe snapshot id |
+| 400 | `unsupported_content_type` | `Content-Type` is not `application/json` |
+| 413 | `payload_too_large` | Body is empty or exceeds 4 MiB |
+| 500 | `db_insert_failed` | R2 put succeeded but D1 insert failed for a non-idempotent reason |
 
-Cursor encodes the last row's `(uploaded_at_utc, screenshot_id)` as `base64(<uploaded_at_utc>:<screenshot_id>)` (last `:` is the delimiter). Pass as `?cursor=` on the next request.
+---
+
+## POST /bazaardb/peek
+
+Claim the next BazaarDB delivery batch. At most one unexpired peek batch may be outstanding at a time.
+
+**Auth:** `Authorization: Bearer <BAZAARDB_PULL_TOKEN>` required. Missing or wrong token → 401 (no body).
+
+### Request body (optional JSON)
+
+```json
+{ "max_items": 10 }
+```
+
+`max_items` defaults to 10 and may only lower the service-side maximum.
+
+### Response 200 with items
+
+```json
+{
+  "peek_id": "pk_...",
+  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z",
+  "items": [
+    {
+      "snapshot_id": "string",
+      "download_url": "https://<account>.r2.cloudflarestorage.com/..."
+    }
+  ]
+}
+```
+
+`download_url` is a 10-minute SigV4 presigned GET URL for the private R2 object containing the full Snapshot DTO.
+
+### Response 200 empty
+
+```json
+{ "peek_id": null, "items": [] }
+```
+
+### Response 409 outstanding lease
+
+```json
+{
+  "status": "peek_outstanding",
+  "peek_id": "pk_...",
+  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z"
+}
+```
+
+Call `confirm` for successfully ingested DTOs or wait for the lease to expire.
+
+### Errors
+
+| Status | Body | Condition |
+|---|---|---|---|
+| 401 | (empty) | Missing or incorrect bearer token |
+
+---
+
+## POST /bazaardb/confirm
+
+Confirm the subset of DTOs from a peek batch that BazaarDB successfully fetched and persisted. Confirmed rows move to `done`; their R2 objects are deleted after the D1 update.
+
+**Auth:** `Authorization: Bearer <BAZAARDB_PULL_TOKEN>` required. Missing or wrong token → 401 (no body).
+
+### Request body
+
+```json
+{
+  "peek_id": "pk_...",
+  "snapshot_ids": ["snap-a", "snap-b"]
+}
+```
+
+### Response 200
+
+```json
+{
+  "confirmed": ["snap-a", "snap-b"],
+  "count": 2
+}
+```
+
+`confirmed` only includes ids that still matched `peek_id` and `delivery_state='pending'`. Repeating a confirm for the same ids returns an empty list.
 
 ### Errors
 
 | Status | Body | Condition |
 |---|---|---|
 | 401 | (empty) | Missing or incorrect bearer token |
-| 400 | `{ "error": "invalid_date" }` | `date` param absent, wrong format, or not a valid calendar date |
-| 400 | `{ "error": "invalid_cursor" }` | `cursor` param present but malformed (cannot decode or parse) |
+| 400 | `{ "error": "missing_peek_id" }` | `peek_id` is missing or blank |
+| 400 | `{ "error": "missing_snapshot_ids" }` | `snapshot_ids` is missing, not an array, or contains no non-empty ids |
 
-### V3 → V4 deltas
+---
 
-- Top-level response key renamed: `items` → `rows`.
-- Cursor format changed: V3 used `?cursor=<screenshot_id>` (bare GUID, not monotonic); V4 uses `?cursor=base64(<uploaded_at_utc>:<screenshot_id>)` composite cursor to avoid skip/duplicate on concurrent uploads.
-- `image_url` field added to each row (stable public URL); `GET /bazaardb/image/:key` Worker endpoint removed.
-- Bearer auth retained (`BAZAARDB_PULL_TOKEN`). Brainstorming mid-draft proposed removing it; reverted — manifest exposes `player_account_id`, `player_name`, `player_rank`, `player_rating`.
-- `limit` upper bound raised from (V3 default) to 500.
+## BazaarDB clean-break notes
+
+- Deleted routes: `POST /bazaardb-screenshots` and `GET /bazaardb/manifest`.
+- The server no longer stores BazaarDB metadata columns; `bazaardb_delivery` is only a delivery queue/ledger.
+- Private R2 objects contain the full Snapshot DTO and are deleted after confirm.
+- Delivery is at-least-once; BazaarDB ingest must be idempotent by `snapshot_id`.

@@ -15,7 +15,7 @@ const BEARER_PREFIX = "Bearer ";
 
 /**
  * Constant-time check for `Authorization: Bearer <env[tokenVar]>`.
- * Used by the BazaarDB pull endpoints (manifest, image proxy).
+ * Used by the BazaarDB pull endpoints (peek, confirm).
  *
  * No other handler verifies a request signature today — `src/crypto/signature.ts`
  * existed but had no callers, so it was removed in the v4 refactor. The

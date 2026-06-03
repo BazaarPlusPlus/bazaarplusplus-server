@@ -1,6 +1,6 @@
 # bazaarplusplus-server
 
-V4 mod-facing backend for BazaarPlusPlus. Serves run-bundle ingest, ghost-battle queries, replay links, and BazaarDB screenshot ingest + daily manifest.
+V4 mod-facing backend for BazaarPlusPlus. Serves run-bundle ingest, ghost-battle queries, replay links, and BazaarDB snapshot delivery with peek/confirm.
 
 Production: `https://mod-api-v4.bazaarplusplus.com`
 

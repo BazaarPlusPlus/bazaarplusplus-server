@@ -4,7 +4,7 @@ import { env } from "cloudflare:test";
 import { createR2Presigner } from "../src/crypto/presign";
 
 test("createR2Presigner returns a URL with SigV4 query params + ISO expiry", async () => {
-  const presigner = createR2Presigner(env);
+  const presigner = createR2Presigner(env, "bazaarplusplus-run-bundles-v4");
   const result = await presigner.sign("run-bundles/foo/bar.mpack.gz", 300);
 
   const url = new URL(result.url);
@@ -21,5 +21,11 @@ test("createR2Presigner returns a URL with SigV4 query params + ISO expiry", asy
 
 test("createR2Presigner throws when any R2 secret is missing", () => {
   const broken = { ...env, R2_ACCESS_KEY_ID: "" };
-  expect(() => createR2Presigner(broken)).toThrow(/R2 SigV4 secrets missing/);
+  expect(() => createR2Presigner(broken, "bazaarplusplus-run-bundles-v4")).toThrow(
+    /R2 SigV4 secrets missing/,
+  );
+});
+
+test("createR2Presigner throws when bucket name is missing", () => {
+  expect(() => createR2Presigner(env, "")).toThrow(/R2 bucket name is required/);
 });

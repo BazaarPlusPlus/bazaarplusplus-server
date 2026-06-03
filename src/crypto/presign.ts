@@ -9,13 +9,14 @@ export interface R2Presigner {
   }>;
 }
 
-const BucketName = "bazaarplusplus-run-bundles-v4";
-
-export function createR2Presigner(env: Env): R2Presigner {
+export function createR2Presigner(env: Env, bucketName: string): R2Presigner {
   if (!env.R2_ACCOUNT_ID || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
     throw new Error(
       "R2 SigV4 secrets missing; run `wrangler secret put R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY`",
     );
+  }
+  if (!bucketName) {
+    throw new Error("R2 bucket name is required for presigned URLs");
   }
 
   const client = new AwsClient({
@@ -34,7 +35,7 @@ export function createR2Presigner(env: Env): R2Presigner {
         .split("/")
         .map((segment) => encodeURIComponent(segment))
         .join("/");
-      const target = new URL(`https://${endpointHost}/${BucketName}/${encodedKey}`);
+      const target = new URL(`https://${endpointHost}/${bucketName}/${encodedKey}`);
       target.searchParams.set("X-Amz-Expires", String(ttlSeconds));
 
       const signed = await client.sign(

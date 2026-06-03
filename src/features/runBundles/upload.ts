@@ -29,13 +29,19 @@ type BattleProjection = {
   player_rank?: unknown;
   player_rating?: unknown;
   player_level?: unknown;
+  player_prestige?: unknown;
+  player_victories?: unknown;
   opponent_name?: unknown;
   opponent_account_id?: unknown;
   opponent_hero?: unknown;
   opponent_rank?: unknown;
   opponent_rating?: unknown;
   opponent_level?: unknown;
+  opponent_prestige?: unknown;
+  opponent_victories?: unknown;
   result?: unknown;
+  winner_combatant_id?: unknown;
+  loser_combatant_id?: unknown;
   is_final_battle?: unknown;
 };
 
@@ -77,9 +83,11 @@ const BATTLE_INSERT_SQL = `
   INSERT INTO battles (
     battle_id, run_id, recorded_at_utc, day,
     player_name, player_account_id, player_hero, player_rank, player_rating, player_level,
+    player_prestige, player_victories,
     opponent_name, opponent_account_id, opponent_hero, opponent_rank, opponent_rating, opponent_level,
-    result, is_final_battle, updated_at_utc
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    opponent_prestige, opponent_victories,
+    result, winner_combatant_id, loser_combatant_id, is_final_battle, updated_at_utc
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(battle_id) DO UPDATE SET
     run_id = excluded.run_id,
     recorded_at_utc = excluded.recorded_at_utc,
@@ -90,13 +98,19 @@ const BATTLE_INSERT_SQL = `
     player_rank = excluded.player_rank,
     player_rating = excluded.player_rating,
     player_level = excluded.player_level,
+    player_prestige = excluded.player_prestige,
+    player_victories = excluded.player_victories,
     opponent_name = excluded.opponent_name,
     opponent_account_id = excluded.opponent_account_id,
     opponent_hero = excluded.opponent_hero,
     opponent_rank = excluded.opponent_rank,
     opponent_rating = excluded.opponent_rating,
     opponent_level = excluded.opponent_level,
+    opponent_prestige = excluded.opponent_prestige,
+    opponent_victories = excluded.opponent_victories,
     result = excluded.result,
+    winner_combatant_id = excluded.winner_combatant_id,
+    loser_combatant_id = excluded.loser_combatant_id,
     is_final_battle = MAX(battles.is_final_battle, excluded.is_final_battle),
     updated_at_utc = excluded.updated_at_utc
 `;
@@ -220,13 +234,19 @@ export async function handleUploadRunBundle(
         optionalTrimmedString(battle.player_rank),
         optionalFiniteNumber(battle.player_rating),
         optionalFiniteNumber(battle.player_level),
+        optionalFiniteNumber(battle.player_prestige),
+        optionalFiniteNumber(battle.player_victories),
         optionalTrimmedString(battle.opponent_name),
         opponentAccountId,
         optionalTrimmedString(battle.opponent_hero),
         optionalTrimmedString(battle.opponent_rank),
         optionalFiniteNumber(battle.opponent_rating),
         optionalFiniteNumber(battle.opponent_level),
+        optionalFiniteNumber(battle.opponent_prestige),
+        optionalFiniteNumber(battle.opponent_victories),
         optionalTrimmedString(battle.result),
+        optionalTrimmedString(battle.winner_combatant_id),
+        optionalTrimmedString(battle.loser_combatant_id),
         isFinalBattle,
         nowUtc,
       ),
