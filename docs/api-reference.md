@@ -13,7 +13,10 @@
 
 **Response 200:**
 ```json
-{ "ok": true }
+{
+  "status": "ok",
+  "server_time_utc": "2026-06-03T00:00:00.000Z"
+}
 ```
 
 No error variants.

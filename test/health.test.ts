@@ -7,5 +7,11 @@ test("GET /health returns ok", async () => {
   const request = new Request("https://example.com/health", { method: "GET" });
   const response = await worker.fetch(request, env);
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ ok: true });
+  const body = (await response.json()) as {
+    status?: string;
+    server_time_utc?: string;
+  };
+  expect(body.status).toBe("ok");
+  expect(typeof body.server_time_utc).toBe("string");
+  expect(Number.isNaN(Date.parse(body.server_time_utc!))).toBe(false);
 });

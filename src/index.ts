@@ -3,9 +3,10 @@ import { handleGetBazaarDbManifest } from "./features/bazaardb/manifest";
 import { handleUploadBazaarDbScreenshot } from "./features/bazaardb/upload";
 import { handleQueryGhostBattles } from "./features/ghostBattles/query";
 import { handleCreateReplayLink } from "./features/ghostBattles/replayLink";
+import { handleHealth } from "./features/health";
 import { handleUploadRunBundle } from "./features/runBundles/upload";
 import { preflight, withCors } from "./http/cors";
-import { json, jsonError } from "./http/json";
+import { jsonError } from "./http/json";
 
 type StaticRoute = {
   method: string;
@@ -14,7 +15,7 @@ type StaticRoute = {
 };
 
 const StaticRoutes: StaticRoute[] = [
-  { method: "GET", path: "/health", handle: () => json({ ok: true }) },
+  { method: "GET", path: "/health", handle: () => handleHealth() },
   { method: "POST", path: "/run-bundles", handle: handleUploadRunBundle },
   { method: "GET", path: "/ghost-battles", handle: handleQueryGhostBattles },
   { method: "POST", path: "/bazaardb-screenshots", handle: handleUploadBazaarDbScreenshot },
