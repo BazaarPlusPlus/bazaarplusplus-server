@@ -76,7 +76,7 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 | `player_rating` | number | |
 | `player_level` | number | |
 | `opponent_name` | string | |
-| `opponent_account_id` | string | filter gate: row written only if null, equals uploader, or in `seen_player_accounts` |
+| `opponent_account_id` | string | nullable; every valid battle projection is written regardless of opponent account |
 | `opponent_hero` | string | |
 | `opponent_rank` | string | |
 | `opponent_rating` | number | |
@@ -111,7 +111,7 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
 - `battles.is_bundle_final_battle` renamed to `is_final_battle` (V3 redundant `bundle_` prefix dropped).
 - `battles.is_final_battle` upsert uses sticky `MAX()` semantics (V3 had unconditional overwrite — bug on retransmit reordering).
-- `seen_player_accounts.last_seen_at_utc` column removed.
+- Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.
 - R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
 
 ---

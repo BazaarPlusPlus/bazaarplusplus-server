@@ -49,11 +49,6 @@ test("GET /ghost-battles without player_account_id returns 400", async () => {
 });
 
 test("GET /ghost-battles returns battles where opponent_account_id = query param", async () => {
-  // For the battle to be projected, the opponent must be a known account.
-  await env.DB.prepare(
-    "INSERT INTO seen_player_accounts (player_account_id, first_seen_at_utc) VALUES (?, ?)",
-  ).bind("ghost-target", "2026-05-01T00:00:00.000Z").run();
-
   await uploadFinalBattle("run-G1", "uploader-X", "ghost-target");
 
   const response = await worker.fetch(

@@ -1,39 +1,5 @@
 type SqlValue = string | number | null;
 
-export type InsertSeenPlayerAccountArgs = {
-  playerAccountId: string;
-  firstSeenAtUtc: string;
-};
-
-export type InsertRunArgs = {
-  runId: string;
-  playerAccountId: string;
-  payloadHash: string;
-  schemaVersion: number;
-  objectKey: string;
-  codec: string;
-  sizeBytes: number;
-  status: string;
-  endedAtUtc: string;
-  submittedAtUtc: string;
-  createdAtUtc: string;
-  updatedAtUtc: string;
-};
-
-export type InsertBattleArgs = {
-  battleId: string;
-  runId: string;
-  recordedAtUtc: string;
-  playerAccountId: string;
-  opponentAccountId?: string | null;
-  isFinalBattle?: number;
-  updatedAtUtc: string;
-};
-
-function exec(db: D1Database, sql: string, values: SqlValue[]): Promise<unknown> {
-  return db.prepare(sql).bind(...values).run();
-}
-
 export async function resetTestState(env: {
   DB: D1Database;
   RUN_BUNDLE_BUCKET: R2Bucket;
@@ -42,7 +8,6 @@ export async function resetTestState(env: {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM battles"),
     env.DB.prepare("DELETE FROM runs"),
-    env.DB.prepare("DELETE FROM seen_player_accounts"),
     env.DB.prepare("DELETE FROM bazaardb_screenshots"),
   ]);
   for (const bucket of [env.RUN_BUNDLE_BUCKET, env.BAZAARDB_BUCKET]) {
@@ -51,17 +16,6 @@ export async function resetTestState(env: {
       await bucket.delete(obj.key);
     }
   }
-}
-
-export async function insertSeenPlayerAccount(
-  db: D1Database,
-  args: InsertSeenPlayerAccountArgs,
-): Promise<void> {
-  await exec(
-    db,
-    "INSERT INTO seen_player_accounts (player_account_id, first_seen_at_utc) VALUES (?, ?)",
-    [args.playerAccountId, args.firstSeenAtUtc],
-  );
 }
 
 export async function selectFirst<T>(
@@ -74,7 +28,7 @@ export async function selectFirst<T>(
 
 export async function countRows(
   db: D1Database,
-  table: "runs" | "battles" | "seen_player_accounts" | "bazaardb_screenshots",
+  table: "runs" | "battles" | "bazaardb_screenshots",
 ): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>();
   return row?.n ?? 0;

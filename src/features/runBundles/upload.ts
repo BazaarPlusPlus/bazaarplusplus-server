@@ -72,32 +72,14 @@ const RUNS_INSERT_SQL = `
     updated_at_utc = excluded.updated_at_utc
 `;
 
-// The battle INSERT uses SELECT ... WHERE to filter at write time without a
-// pre-flight SELECT round-trip. The 3 WHERE branches (OR-chained):
-//   1. opponent_account_id IS NULL
-//   2. opponent_account_id == uploader_player_account_id (self-battle, literal)
-//   3. opponent_account_id IN seen_player_accounts (known BPP user)
-// Branch 2 is load-bearing: it covers self-battles WITHOUT relying on intra-batch
-// read-after-write visibility against seen_player_accounts (which D1 doesn't
-// guarantee). The seen_player_accounts INSERT goes LAST in the batch.
-//
 // is_final_battle on conflict uses MAX() — sticky semantics. Once 1, never 0.
-//
-// Bind parameters are ?1..?20; ?N notation (explicit positional) lets us reference
-// the same bound value in multiple clauses without duplicating it.
-//   ?12 = opponent_account_id (used in SELECT column list AND in WHERE)
-//   ?20 = uploader player_account_id (used in WHERE self-battle branch)
 const BATTLE_INSERT_SQL = `
   INSERT INTO battles (
     battle_id, run_id, recorded_at_utc, day,
     player_name, player_account_id, player_hero, player_rank, player_rating, player_level,
     opponent_name, opponent_account_id, opponent_hero, opponent_rank, opponent_rating, opponent_level,
     result, is_final_battle, updated_at_utc
-  )
-  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
-  WHERE ?12 IS NULL
-     OR ?12 = ?20
-     OR ?12 IN (SELECT player_account_id FROM seen_player_accounts)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(battle_id) DO UPDATE SET
     run_id = excluded.run_id,
     recorded_at_utc = excluded.recorded_at_utc,
@@ -221,78 +203,41 @@ export async function handleUploadRunBundle(
     ),
   );
 
-  // Statements 1..N: one per battle. The SQL WHERE filters at write time:
-  // battles with unknown opponents are silently discarded with zero round-trips.
-  // battles_in_payload === battles.length at this layer; "actually written" count
-  // is read back from meta.changes after the batch (no pre-flight needed).
+  // Statements 1..N: one upsert per battle projection.
   for (const battle of battleProjections) {
     const opponentAccountId = optionalTrimmedString(battle.opponent_account_id);
     const isFinalBattle = battle.is_final_battle === true ? 1 : 0;
 
-    // 20 bind values (?1..?20):
-    //  ?1  battle_id
-    //  ?2  run_id
-    //  ?3  recorded_at_utc
-    //  ?4  day
-    //  ?5  player_name
-    //  ?6  player_account_id (uploader)
-    //  ?7  player_hero
-    //  ?8  player_rank
-    //  ?9  player_rating
-    //  ?10 player_level
-    //  ?11 opponent_name
-    //  ?12 opponent_account_id (also referenced by WHERE)
-    //  ?13 opponent_hero
-    //  ?14 opponent_rank
-    //  ?15 opponent_rating
-    //  ?16 opponent_level
-    //  ?17 result
-    //  ?18 is_final_battle
-    //  ?19 updated_at_utc
-    //  ?20 uploader again (compared against ?12 in WHERE for self-battle)
     statements.push(
       env.DB.prepare(BATTLE_INSERT_SQL).bind(
-        optionalTrimmedString(battle.battle_id),               // ?1
-        inner.run_id,                                          // ?2
-        optionalTrimmedString(battle.recorded_at_utc) ?? nowUtc, // ?3
-        optionalFiniteNumber(battle.day),                      // ?4
-        optionalTrimmedString(battle.player_name),             // ?5
-        outer.player_account_id,                               // ?6 — uploader
-        optionalTrimmedString(battle.player_hero),             // ?7
-        optionalTrimmedString(battle.player_rank),             // ?8
-        optionalFiniteNumber(battle.player_rating),            // ?9
-        optionalFiniteNumber(battle.player_level),             // ?10
-        optionalTrimmedString(battle.opponent_name),           // ?11
-        opponentAccountId,                                     // ?12 — used in WHERE
-        optionalTrimmedString(battle.opponent_hero),           // ?13
-        optionalTrimmedString(battle.opponent_rank),           // ?14
-        optionalFiniteNumber(battle.opponent_rating),          // ?15
-        optionalFiniteNumber(battle.opponent_level),           // ?16
-        optionalTrimmedString(battle.result),                  // ?17
-        isFinalBattle,                                         // ?18
-        nowUtc,                                                // ?19
-        outer.player_account_id,                               // ?20 — uploader (WHERE self-battle)
+        optionalTrimmedString(battle.battle_id),
+        inner.run_id,
+        optionalTrimmedString(battle.recorded_at_utc) ?? nowUtc,
+        optionalFiniteNumber(battle.day),
+        optionalTrimmedString(battle.player_name),
+        outer.player_account_id,
+        optionalTrimmedString(battle.player_hero),
+        optionalTrimmedString(battle.player_rank),
+        optionalFiniteNumber(battle.player_rating),
+        optionalFiniteNumber(battle.player_level),
+        optionalTrimmedString(battle.opponent_name),
+        opponentAccountId,
+        optionalTrimmedString(battle.opponent_hero),
+        optionalTrimmedString(battle.opponent_rank),
+        optionalFiniteNumber(battle.opponent_rating),
+        optionalFiniteNumber(battle.opponent_level),
+        optionalTrimmedString(battle.result),
+        isFinalBattle,
+        nowUtc,
       ),
     );
   }
-
-  // Statement N+1: seen_player_accounts INSERT goes LAST per spec Section 4.4 point 3.
-  // D1 doesn't guarantee intra-batch read-after-write; the self-battle case above
-  // uses a literal comparison (?12 = ?20) rather than relying on this row being visible.
-  statements.push(
-    env.DB.prepare(
-      "INSERT OR IGNORE INTO seen_player_accounts (player_account_id, first_seen_at_utc) VALUES (?, ?)",
-    ).bind(outer.player_account_id, nowUtc),
-  );
 
   const d1Start = Date.now();
   let battlesActuallyWritten = 0;
   try {
     const batchResults = await env.DB.batch(statements);
-    // Statement 0 is the runs upsert; statements 1..battleProjections.length are battles;
-    // the last statement is seen_player_accounts. Each battle INSERT may write 0 rows
-    // (WHERE filter rejected the opponent) or 1 row (inserted or updated on conflict).
-    // Sum meta.changes across the battle slice for the real projected count.
+    // Statement 0 is the runs upsert; statements 1..battleProjections.length are battle upserts.
     const battleResults = batchResults.slice(1, 1 + battleProjections.length);
     battlesActuallyWritten = battleResults.reduce(
       (sum, r) => sum + (r.meta?.changes ?? 0),
@@ -325,8 +270,7 @@ export async function handleUploadRunBundle(
     run_id: inner.run_id,
     phase_ms: { parse: parseMs, r2_put: r2PutMs, d1_batch: d1BatchMs, total: Date.now() - phaseStart },
     battles_in_payload: battleProjections.length,
-    // battles_projected = rows actually written (filter may discard some battles at SQL level).
-    // battles_in_payload - battles_projected = count filtered out by the seen_player_accounts gate.
+    // battles_projected = rows inserted or updated by the battle upserts.
     battles_projected: battlesActuallyWritten,
     outcome: "ok",
   });

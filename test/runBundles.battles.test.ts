@@ -4,7 +4,6 @@ import { env } from "cloudflare:test";
 import worker from "../src/index";
 import {
   countRows,
-  insertSeenPlayerAccount,
   resetTestState,
   selectFirst,
 } from "./helpers/seed";
@@ -56,7 +55,7 @@ beforeEach(async () => {
   await resetTestState(env);
 });
 
-test("battles are filtered: unknown opponent → not projected", async () => {
+test("battles are projected even when the opponent was not seen before", async () => {
   const response = await worker.fetch(
     buildUpload(payload({
       runId: "run-A",
@@ -68,14 +67,10 @@ test("battles are filtered: unknown opponent → not projected", async () => {
     env,
   );
   expect(response.status).toBe(200);
-  expect(await countRows(env.DB, "battles")).toBe(0);
+  expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
-test("battles are projected: opponent in seen_player_accounts → kept", async () => {
-  await insertSeenPlayerAccount(env.DB, {
-    playerAccountId: "known-opponent",
-    firstSeenAtUtc: "2026-05-01T00:00:00.000Z",
-  });
+test("battles are projected with opponent account metadata", async () => {
   const response = await worker.fetch(
     buildUpload(payload({
       runId: "run-B",
@@ -90,7 +85,7 @@ test("battles are projected: opponent in seen_player_accounts → kept", async (
   expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
-test("self-battle: opponent == uploader → projected even without seen-account row", async () => {
+test("self-battle: opponent == uploader → projected", async () => {
   const response = await worker.fetch(
     buildUpload(payload({
       runId: "run-C",
@@ -121,10 +116,6 @@ test("battles with NULL opponent_account_id are projected", async () => {
 });
 
 test("re-upload with same battle_id does not rollback batch (ON CONFLICT DO UPDATE)", async () => {
-  await insertSeenPlayerAccount(env.DB, {
-    playerAccountId: "opp-1",
-    firstSeenAtUtc: "2026-05-01T00:00:00.000Z",
-  });
   const first = await worker.fetch(
     buildUpload(payload({
       runId: "run-E",
@@ -159,10 +150,6 @@ test("re-upload with same battle_id does not rollback batch (ON CONFLICT DO UPDA
 });
 
 test("sticky is_final_battle: once 1, stays 1 even on stale retransmit", async () => {
-  await insertSeenPlayerAccount(env.DB, {
-    playerAccountId: "opp-2",
-    firstSeenAtUtc: "2026-05-01T00:00:00.000Z",
-  });
   // Final upload arrives first.
   await worker.fetch(
     buildUpload(payload({
@@ -190,7 +177,7 @@ test("sticky is_final_battle: once 1, stays 1 even on stale retransmit", async (
   expect(row?.is_final_battle).toBe(1);
 });
 
-test("seen_player_accounts row inserted for uploader once per first upload", async () => {
+test("uploading a run without battles only writes the run projection", async () => {
   await worker.fetch(
     buildUpload(payload({
       runId: "run-G",
@@ -199,10 +186,12 @@ test("seen_player_accounts row inserted for uploader once per first upload", asy
     })),
     env,
   );
-  expect(await countRows(env.DB, "seen_player_accounts")).toBe(1);
+  expect(await countRows(env.DB, "runs")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(0);
   const row = await selectFirst<{ player_account_id: string }>(
     env.DB,
-    "SELECT player_account_id FROM seen_player_accounts",
+    "SELECT player_account_id FROM runs WHERE run_id = ?",
+    ["run-G"],
   );
   expect(row?.player_account_id).toBe("uploader-2");
 });

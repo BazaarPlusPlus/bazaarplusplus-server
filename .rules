@@ -5,7 +5,7 @@
 - The wire contract in `docs/api-reference.md` is the single source of truth. Field renames in test fixtures without updating the doc are bugs.
 - Battle INSERTs in `runBundles/upload.ts` must always include `ON CONFLICT(battle_id) DO UPDATE` — without it, the entire D1 batch (including the `runs` upsert) rolls back on duplicate. See spec Section 4.4 point 1.
 - `is_final_battle` upserts must use `MAX(battles.is_final_battle, excluded.is_final_battle)` — sticky semantics. Unconditional overwrite is a bug: late-arriving non-final retransmits would otherwise flip a final battle back to 0. See spec Section 4.4 point 2.
-- `seen_player_accounts` INSERT must be the LAST statement in the upload batch. D1 intra-batch read-after-write visibility is not guaranteed; the self-battle case is covered by the literal `OR opponent_account_id = uploader_player_account_id` comparison, not by subquery against this table. See spec Section 4.4 points 3-4.
+- Battle projection is full-ingest: every valid `battle_projections[]` item should be upserted into `battles` regardless of opponent account. Do not reintroduce opponent allow-list filtering without updating the API doc, schema, and tests together.
 - `customMetadata` on R2 puts is intentionally empty. V3 wrote `retention_days` here, but no code ever read it. R2 lifecycle lives in the CF dashboard.
 
 # Pull Request Hygiene
