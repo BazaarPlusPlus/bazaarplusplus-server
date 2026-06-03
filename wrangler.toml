@@ -18,7 +18,7 @@ custom_domain = true
 [[d1_databases]]
 binding = "DB"
 database_name = "bazaarplusplus-mod-api-v4-db"
-database_id = "1d856435-3233-411f-a201-b3b24e3dbf8d"
+database_id = "d896eae0-b132-4a0a-a4c0-4798c9f8c3be"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
@@ -27,4 +27,4 @@ bucket_name = "bazaarplusplus-run-bundles-v4"
 
 [[r2_buckets]]
 binding = "BAZAARDB_BUCKET"
-bucket_name = "bazaarplusplus-bazaardb-assets-v4"
+bucket_name = "bazaarplusplus-bazaardb-snapshots-v4"

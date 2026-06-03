@@ -1,4 +1,4 @@
-export const BazaarDbBucketName = "bazaarplusplus-bazaardb-assets-v4";
+export const BazaarDbBucketName = "bazaarplusplus-bazaardb-snapshots-v4";
 export const LeaseSeconds = 600;
 export const MaxDeliveryAttempts = 3;
 export const PeekMaxItems = 10;
