@@ -9,6 +9,7 @@ type GhostBattleRow = {
   recorded_at_utc: string;
   day: number | null;
   player_name: string | null;
+  player_account_id: string | null;
   player_hero: string | null;
   player_rank: string | null;
   player_rating: number | null;
@@ -26,7 +27,6 @@ type GhostBattleRow = {
   result: string | null;
   winner_combatant_id: string | null;
   loser_combatant_id: string | null;
-  is_final_battle: number;
 };
 
 export async function handleQueryGhostBattles(
@@ -50,11 +50,11 @@ export async function handleQueryGhostBattles(
     `
       SELECT
         battle_id, recorded_at_utc, day,
-        player_name, player_hero, player_rank, player_rating, player_level,
+        player_name, player_account_id, player_hero, player_rank, player_rating, player_level,
         player_prestige, player_victories,
         opponent_name, opponent_account_id, opponent_hero, opponent_rank,
         opponent_rating, opponent_level, opponent_prestige, opponent_victories,
-        result, winner_combatant_id, loser_combatant_id, is_final_battle
+        result, winner_combatant_id, loser_combatant_id
       FROM battles
       WHERE opponent_account_id = ?
         AND recorded_at_utc >= ?
@@ -71,6 +71,7 @@ export async function handleQueryGhostBattles(
     recorded_at_utc: row.recorded_at_utc,
     day: row.day,
     player_name: row.player_name,
+    player_account_id: row.player_account_id,
     player_hero: row.player_hero,
     player_rank: row.player_rank,
     player_rating: row.player_rating,
@@ -88,7 +89,6 @@ export async function handleQueryGhostBattles(
     result: row.result,
     winner_combatant_id: row.winner_combatant_id,
     loser_combatant_id: row.loser_combatant_id,
-    is_final_battle: row.is_final_battle === 1,
   }));
 
   logInfo("ghost_battles.query", {

@@ -4,7 +4,12 @@ import { toBase64Url } from "../../crypto/base64";
 import { sha256Base64 } from "../../crypto/hash";
 import type { Env } from "../../env";
 import { json, jsonError, readJson } from "../../http/json";
-import { optionalFiniteNumber, optionalTrimmedString } from "../../http/request";
+import {
+  normalizeIsoDateTime,
+  optionalFiniteNumber,
+  optionalIsoDateTime,
+  optionalTrimmedString,
+} from "../../http/request";
 import { objectKeySegment, parseBody } from "../../http/validation";
 import { logInfo, logWarn } from "../../observability";
 
@@ -42,7 +47,11 @@ type BattleProjection = {
   result?: unknown;
   winner_combatant_id?: unknown;
   loser_combatant_id?: unknown;
-  is_final_battle?: unknown;
+};
+
+type ExistingRunRow = {
+  payload_hash: string;
+  object_key: string;
 };
 
 const RUNS_INSERT_SQL = `
@@ -53,32 +62,8 @@ const RUNS_INSERT_SQL = `
     final_player_rank, final_player_rating, final_player_position,
     submitted_at_utc, created_at_utc, updated_at_utc
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(run_id) DO UPDATE SET
-    player_account_id = excluded.player_account_id,
-    payload_hash = excluded.payload_hash,
-    schema_version = excluded.schema_version,
-    object_key = excluded.object_key,
-    codec = excluded.codec,
-    size_bytes = excluded.size_bytes,
-    status = excluded.status,
-    hero_id = excluded.hero_id,
-    hero_name = excluded.hero_name,
-    player_rank = excluded.player_rank,
-    player_rating = excluded.player_rating,
-    player_position = excluded.player_position,
-    started_at_utc = excluded.started_at_utc,
-    ended_at_utc = excluded.ended_at_utc,
-    final_day = excluded.final_day,
-    final_wins = excluded.final_wins,
-    final_losses = excluded.final_losses,
-    final_player_rank = excluded.final_player_rank,
-    final_player_rating = excluded.final_player_rating,
-    final_player_position = excluded.final_player_position,
-    submitted_at_utc = excluded.submitted_at_utc,
-    updated_at_utc = excluded.updated_at_utc
 `;
 
-// is_final_battle on conflict uses MAX() — sticky semantics. Once 1, never 0.
 const BATTLE_INSERT_SQL = `
   INSERT INTO battles (
     battle_id, run_id, recorded_at_utc, day,
@@ -86,8 +71,8 @@ const BATTLE_INSERT_SQL = `
     player_prestige, player_victories,
     opponent_name, opponent_account_id, opponent_hero, opponent_rank, opponent_rating, opponent_level,
     opponent_prestige, opponent_victories,
-    result, winner_combatant_id, loser_combatant_id, is_final_battle, updated_at_utc
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    result, winner_combatant_id, loser_combatant_id, updated_at_utc
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(battle_id) DO UPDATE SET
     run_id = excluded.run_id,
     recorded_at_utc = excluded.recorded_at_utc,
@@ -111,9 +96,21 @@ const BATTLE_INSERT_SQL = `
     result = excluded.result,
     winner_combatant_id = excluded.winner_combatant_id,
     loser_combatant_id = excluded.loser_combatant_id,
-    is_final_battle = MAX(battles.is_final_battle, excluded.is_final_battle),
     updated_at_utc = excluded.updated_at_utc
 `;
+
+async function findExistingRun(env: Env, runId: string): Promise<ExistingRunRow | null> {
+  return env.DB.prepare(
+    `
+      SELECT payload_hash, object_key
+      FROM runs
+      WHERE run_id = ?
+      LIMIT 1
+    `,
+  )
+    .bind(runId)
+    .first<ExistingRunRow>();
+}
 
 export async function handleUploadRunBundle(
   request: Request,
@@ -142,6 +139,16 @@ export async function handleUploadRunBundle(
     status: { type: "string", errorCode: "invalid_run_bundle_request" },
     ended_at_utc: { type: "string", errorCode: "invalid_run_bundle_request" },
   });
+  const submittedAtUtc = normalizeIsoDateTime(outer.submitted_at_utc);
+  const endedAtUtc = normalizeIsoDateTime(inner.ended_at_utc);
+  const startedAtUtc = optionalIsoDateTime(runProjectionRaw.started_at_utc);
+  if (
+    submittedAtUtc == null ||
+    endedAtUtc == null ||
+    (runProjectionRaw.started_at_utc != null && startedAtUtc == null)
+  ) {
+    return jsonError("invalid_run_bundle_request");
+  }
 
   const battleProjections: BattleProjection[] = Array.isArray(rawBody.battle_projections)
     ? (rawBody.battle_projections as BattleProjection[])
@@ -153,6 +160,9 @@ export async function handleUploadRunBundle(
     if (!battleId) return jsonError("battle_id_required");
     const battleRunId = optionalTrimmedString(battle.run_id);
     if (battleRunId !== inner.run_id) return jsonError("battle_run_id_mismatch");
+    if (battle.recorded_at_utc != null && optionalIsoDateTime(battle.recorded_at_utc) == null) {
+      return jsonError("invalid_run_bundle_request");
+    }
   }
 
   const parseMs = Date.now() - phaseStart;
@@ -162,6 +172,15 @@ export async function handleUploadRunBundle(
   const runKeySegment = objectKeySegment(inner.run_id);
   if (playerKeySegment == null || runKeySegment == null) {
     return jsonError("invalid_run_bundle_request");
+  }
+
+  const existingRun = await findExistingRun(env, inner.run_id);
+  if (existingRun != null) {
+    if (existingRun.payload_hash !== payloadHash) {
+      return jsonError("run_bundle_conflict", 409);
+    }
+
+    return json({ status: "accepted", run_id: inner.run_id, object_key: existingRun.object_key });
   }
   const objectKey =
     `run-bundles/${playerKeySegment}/${runKeySegment}/${toBase64Url(payloadHash)}.mpack.gz`;
@@ -187,7 +206,7 @@ export async function handleUploadRunBundle(
 
   const statements: D1PreparedStatement[] = [];
 
-  // Statement 0: runs upsert.
+  // Statement 0: runs insert. Existing run_id is handled before R2 write.
   statements.push(
     env.DB.prepare(RUNS_INSERT_SQL).bind(
       inner.run_id,
@@ -203,15 +222,15 @@ export async function handleUploadRunBundle(
       optionalTrimmedString(runProjectionRaw.player_rank),
       optionalFiniteNumber(runProjectionRaw.player_rating),
       optionalFiniteNumber(runProjectionRaw.player_position),
-      optionalTrimmedString(runProjectionRaw.started_at_utc),
-      inner.ended_at_utc,
+      startedAtUtc,
+      endedAtUtc,
       optionalFiniteNumber(runProjectionRaw.final_day),
       optionalFiniteNumber(runProjectionRaw.final_wins),
       optionalFiniteNumber(runProjectionRaw.final_losses),
       optionalTrimmedString(runProjectionRaw.final_player_rank),
       optionalFiniteNumber(runProjectionRaw.final_player_rating),
       optionalFiniteNumber(runProjectionRaw.final_player_position),
-      outer.submitted_at_utc,
+      submittedAtUtc,
       nowUtc,
       nowUtc,
     ),
@@ -220,13 +239,12 @@ export async function handleUploadRunBundle(
   // Statements 1..N: one upsert per battle projection.
   for (const battle of battleProjections) {
     const opponentAccountId = optionalTrimmedString(battle.opponent_account_id);
-    const isFinalBattle = battle.is_final_battle === true ? 1 : 0;
 
     statements.push(
       env.DB.prepare(BATTLE_INSERT_SQL).bind(
         optionalTrimmedString(battle.battle_id),
         inner.run_id,
-        optionalTrimmedString(battle.recorded_at_utc) ?? nowUtc,
+        optionalIsoDateTime(battle.recorded_at_utc) ?? nowUtc,
         optionalFiniteNumber(battle.day),
         optionalTrimmedString(battle.player_name),
         outer.player_account_id,
@@ -247,7 +265,6 @@ export async function handleUploadRunBundle(
         optionalTrimmedString(battle.result),
         optionalTrimmedString(battle.winner_combatant_id),
         optionalTrimmedString(battle.loser_combatant_id),
-        isFinalBattle,
         nowUtc,
       ),
     );
@@ -257,7 +274,7 @@ export async function handleUploadRunBundle(
   let battlesActuallyWritten = 0;
   try {
     const batchResults = await env.DB.batch(statements);
-    // Statement 0 is the runs upsert; statements 1..battleProjections.length are battle upserts.
+    // Statement 0 is the runs insert; statements 1..battleProjections.length are battle upserts.
     const battleResults = batchResults.slice(1, 1 + battleProjections.length);
     battlesActuallyWritten = battleResults.reduce(
       (sum, r) => sum + (r.meta?.changes ?? 0),
@@ -282,6 +299,20 @@ export async function handleUploadRunBundle(
         outcome: "d1_batch_failed_r2_orphaned",
       });
     }
+
+    const racedExistingRun = await findExistingRun(env, inner.run_id);
+    if (racedExistingRun != null) {
+      if (racedExistingRun.payload_hash === payloadHash) {
+        return json({
+          status: "accepted",
+          run_id: inner.run_id,
+          object_key: racedExistingRun.object_key,
+        });
+      }
+
+      return jsonError("run_bundle_conflict", 409);
+    }
+
     throw error;
   }
   const d1BatchMs = Date.now() - d1Start;

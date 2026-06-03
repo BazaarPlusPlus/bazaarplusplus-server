@@ -37,7 +37,6 @@ async function uploadFinalBattle(runId: string, uploader: string, opponent: stri
           result: "Won",
           winner_combatant_id: "winner-combatant",
           loser_combatant_id: "loser-combatant",
-          is_final_battle: true,
         }],
       }),
     }),
@@ -68,6 +67,7 @@ test("GET /ghost-battles returns battles where opponent_account_id = query param
   expect(body.battles).toHaveLength(1);
   expect(body.battles[0]).toMatchObject({
     battle_id: "run-G1-b1",
+    player_account_id: "uploader-X",
     opponent_account_id: "ghost-target",
     player_prestige: 6,
     player_victories: 12,
@@ -76,11 +76,11 @@ test("GET /ghost-battles returns battles where opponent_account_id = query param
     result: "Won",
     winner_combatant_id: "winner-combatant",
     loser_combatant_id: "loser-combatant",
-    is_final_battle: true,
   });
   expect(body.battles[0]).not.toHaveProperty("hour");
   expect(body.battles[0]).not.toHaveProperty("encounter_id");
   expect(body.battles[0]).not.toHaveProperty("combat_kind");
+  expect(body.battles[0]).not.toHaveProperty("is_final_battle");
   // V4: NO replay_available, NO player_account_id_in_payload in the response.
   expect(body.battles[0]).not.toHaveProperty("replay_available");
   expect(body.battles[0]).not.toHaveProperty("player_account_id_in_payload");

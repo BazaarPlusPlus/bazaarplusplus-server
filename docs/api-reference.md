@@ -35,7 +35,7 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 |---|---|---|
 | `schema_version` | number (finite integer) | yes |
 | `player_account_id` | string (non-empty) | yes |
-| `submitted_at_utc` | string (ISO-8601) | yes |
+| `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | yes |
 | `artifact_codec` | string | yes |
 | `artifact_bytes` | base64 string or byte array | yes |
 | `run_projection` | object (see below) | no (defaults to `{}`) |
@@ -47,13 +47,13 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 |---|---|
 | `run_id` | string (non-empty) | **required** |
 | `status` | string | **required** |
-| `ended_at_utc` | string | **required** |
+| `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | **required** |
 | `hero_id` | string |
 | `hero_name` | string |
 | `player_rank` | string |
 | `player_rating` | number |
 | `player_position` | number |
-| `started_at_utc` | string |
+| `started_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) |
 | `final_day` | number |
 | `final_wins` | number |
 | `final_losses` | number |
@@ -67,7 +67,7 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 |---|---|---|
 | `battle_id` | string | required; missing → 400 `battle_id_required` |
 | `run_id` | string | required; must equal `run_projection.run_id` or → 400 `battle_run_id_mismatch` |
-| `recorded_at_utc` | string | defaults to server time |
+| `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | defaults to server time |
 | `day` | number | |
 | `player_name` | string | |
 | `player_account_id` | string | uploader |
@@ -88,7 +88,6 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 | `result` | string | |
 | `winner_combatant_id` | string | |
 | `loser_combatant_id` | string | |
-| `is_final_battle` | boolean | upsert uses sticky MAX — once true, never reverts |
 
 ### Response 200 (accepted)
 
@@ -106,17 +105,17 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 
 | Status | `error` code | Condition |
 |---|---|---|
-| 400 | `invalid_run_bundle_request` | Missing/invalid top-level field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`, `artifact_bytes`), invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, or `player_account_id` produces an unsafe key segment |
+| 400 | `invalid_run_bundle_request` | Missing/invalid top-level field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`, `artifact_bytes`), invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, or `player_account_id`/`run_id` produces an unsafe key segment |
 | 400 | `battle_id_required` | A battle in `battle_projections` has no `battle_id` |
 | 400 | `battle_run_id_mismatch` | A battle's `run_id` does not match `run_projection.run_id` |
+| 409 | `run_bundle_conflict` | The `run_id` already exists with a different artifact hash |
 | 500 | (rethrown) | R2 put failure or D1 batch failure after best-effort cleanup |
 
 ### V3 → V4 deltas
 
 - `player_account_id` no longer accepts `"anonymous-player"` sentinel; server rejects empty/missing with `invalid_run_bundle_request`. Mod must skip upload if account id is unavailable.
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
-- `battles.is_bundle_final_battle` renamed to `is_final_battle` (V3 redundant `bundle_` prefix dropped).
-- `battles.is_final_battle` upsert uses sticky `MAX()` semantics (V3 had unconditional overwrite — bug on retransmit reordering).
+- Bundle-final battle metadata is no longer part of the V4 mod-facing wire contract.
 - Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.
 - R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
 
@@ -145,6 +144,7 @@ Query battles where the given player was the opponent. Returns battles recorded 
       "recorded_at_utc": "string",
       "day": "number | null",
       "player_name": "string | null",
+      "player_account_id": "string | null",
       "player_hero": "string | null",
       "player_rank": "string | null",
       "player_rating": "number | null",
@@ -161,8 +161,7 @@ Query battles where the given player was the opponent. Returns battles recorded 
       "opponent_victories": "number | null",
       "result": "string | null",
       "winner_combatant_id": "string | null",
-      "loser_combatant_id": "string | null",
-      "is_final_battle": "boolean"
+      "loser_combatant_id": "string | null"
     }
   ]
 }
@@ -178,7 +177,7 @@ Rows ordered by `recorded_at_utc DESC, battle_id DESC`.
 
 ### V3 → V4 deltas
 
-- `battles[].is_bundle_final_battle` renamed to `is_final_battle`.
+- Bundle-final battle metadata is no longer returned.
 - `battles[].replay_available` removed (was dead field; mod side should hardcode `ReplayAvailable = true` locally).
 - `battles[].player_account_id_in_payload` removed.
 - Lookback window hardcoded to 5 days (was `GHOST_QUERY_LOOKBACK_DAYS` env var in V3).
@@ -230,7 +229,7 @@ No request body.
 
 ## POST /bazaardb/snapshots/:snapshot_id
 
-Upload one BazaarDB snapshot DTO. The body is stored as opaque JSON bytes: the server does not parse the DTO, decode image bytes, calculate a hash, or write metadata columns.
+Upload one BazaarDB snapshot DTO. The body is stored mostly as opaque JSON bytes: the server only minimally parses `snapshot.id` to verify it matches the path, and does not decode image bytes, calculate a hash, or write metadata columns.
 
 **Auth:** None.
 
@@ -242,7 +241,7 @@ Upload one BazaarDB snapshot DTO. The body is stored as opaque JSON bytes: the s
 
 ### Request body
 
-`Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. Max body size is 4 MiB. Empty bodies are rejected.
+`Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. Max body size is 4 MiB. Empty bodies are rejected. The server minimally parses the JSON and requires `snapshot.id` to equal the `:snapshot_id` path parameter; the rest of the DTO is stored opaquely.
 
 Example shape:
 
@@ -297,6 +296,8 @@ Re-uploading an existing `snapshot_id` is a no-op for every state (`pending`, le
 |---|---|---|
 | 400 | `invalid_snapshot_id` | Decoded path id is not a safe snapshot id |
 | 400 | `unsupported_content_type` | `Content-Type` is not `application/json` |
+| 400 | `invalid_snapshot_body` | Body is not valid JSON or lacks a `snapshot.id` field |
+| 400 | `snapshot_id_mismatch` | Body `snapshot.id` does not match the path `:snapshot_id` |
 | 413 | `payload_too_large` | Body is empty or exceeds 4 MiB |
 | 500 | `db_insert_failed` | R2 put succeeded but D1 insert failed for a non-idempotent reason |
 
@@ -392,6 +393,7 @@ Confirm the subset of DTOs from a peek batch that BazaarDB successfully fetched 
 | 401 | (empty) | Missing or incorrect bearer token |
 | 400 | `{ "error": "missing_peek_id" }` | `peek_id` is missing or blank |
 | 400 | `{ "error": "missing_snapshot_ids" }` | `snapshot_ids` is missing, not an array, or contains no non-empty ids |
+| 400 | `{ "error": "too_many_snapshot_ids" }` | More than 10 unique non-empty ids were supplied |
 
 ---
 

@@ -107,6 +107,17 @@ test("snapshot upload guards id, content type, payload size, and old routes", as
   expect(invalidId.status).toBe(400);
   expect(await invalidId.json()).toEqual({ error: "invalid_snapshot_id" });
 
+  const invalidBody = await worker.fetch(snapshotUpload("snap-body", "{}"), env);
+  expect(invalidBody.status).toBe(400);
+  expect(await invalidBody.json()).toEqual({ error: "invalid_snapshot_body" });
+
+  const idMismatch = await worker.fetch(
+    snapshotUpload("snap-path", JSON.stringify({ snapshot: { id: "snap-body" } })),
+    env,
+  );
+  expect(idMismatch.status).toBe(400);
+  expect(await idMismatch.json()).toEqual({ error: "snapshot_id_mismatch" });
+
   const wrongContentType = await worker.fetch(
     snapshotUpload("snap-content", "{}", "text/plain"),
     env,
@@ -136,7 +147,8 @@ test("snapshot upload guards id, content type, payload size, and old routes", as
 });
 
 test("re-upload of any existing snapshot id is a no-op and does not replace R2", async () => {
-  await worker.fetch(snapshotUpload("snap-dupe", "{\"first\":true}"), env);
+  const firstBody = JSON.stringify({ snapshot: { id: "snap-dupe" }, first: true });
+  await worker.fetch(snapshotUpload("snap-dupe", firstBody), env);
   const firstRow = await selectFirst<{ r2_key: string }>(
     env.DB,
     "SELECT r2_key FROM bazaardb_delivery WHERE snapshot_id = ?",
@@ -163,9 +175,7 @@ test("re-upload of any existing snapshot id is a no-op and does not replace R2",
   expect((await env.BAZAARDB_BUCKET.list()).objects.map((o) => o.key)).toEqual([
     firstRow!.r2_key,
   ]);
-  expect(await (await env.BAZAARDB_BUCKET.get(firstRow!.r2_key))!.text()).toBe(
-    "{\"first\":true}",
-  );
+  expect(await (await env.BAZAARDB_BUCKET.get(firstRow!.r2_key))!.text()).toBe(firstBody);
 });
 
 test("POST /bazaardb/peek claims oldest pending rows and returns presigned URLs", async () => {
@@ -266,6 +276,16 @@ test("confirm marks only requested DTOs done and deletes their R2 objects", asyn
 
   const stillLocked = await peek();
   expect(stillLocked.status).toBe(409);
+});
+
+test("confirm rejects more snapshot ids than the peek batch maximum", async () => {
+  const response = await confirm(
+    "pk_overflow",
+    Array.from({ length: 11 }, (_, index) => `snap-${index}`),
+  );
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "too_many_snapshot_ids" });
 });
 
 test("expired leases can be reclaimed with a new peek id", async () => {

@@ -22,7 +22,6 @@ function payload(opts: {
   battles: Array<{
     battle_id: string;
     opponent_account_id: string | null;
-    is_final_battle: boolean;
     player_prestige?: number;
     player_victories?: number;
     opponent_prestige?: number;
@@ -60,7 +59,6 @@ function payload(opts: {
       result: "Won",
       winner_combatant_id: b.winner_combatant_id ?? "player-combatant",
       loser_combatant_id: b.loser_combatant_id ?? "opponent-combatant",
-      is_final_battle: b.is_final_battle,
     })),
   };
 }
@@ -75,7 +73,7 @@ test("battles are projected even when the opponent was not seen before", async (
       runId: "run-A",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-unknown", opponent_account_id: "stranger", is_final_battle: false },
+        { battle_id: "b-unknown", opponent_account_id: "stranger" },
       ],
     })),
     env,
@@ -90,7 +88,7 @@ test("battles are projected with opponent account metadata", async () => {
       runId: "run-B",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-known", opponent_account_id: "known-opponent", is_final_battle: false },
+        { battle_id: "b-known", opponent_account_id: "known-opponent" },
       ],
     })),
     env,
@@ -108,7 +106,6 @@ test("battles project participant prestige, victories, and winner/loser ids", as
         {
           battle_id: "b-rich",
           opponent_account_id: "known-opponent",
-          is_final_battle: true,
           player_prestige: 4,
           player_victories: 11,
           opponent_prestige: 5,
@@ -157,7 +154,7 @@ test("self-battle: opponent == uploader → projected", async () => {
       runId: "run-C",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-self", opponent_account_id: "uploader-1", is_final_battle: false },
+        { battle_id: "b-self", opponent_account_id: "uploader-1" },
       ],
     })),
     env,
@@ -172,7 +169,7 @@ test("battles with NULL opponent_account_id are projected", async () => {
       runId: "run-D",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-null-opp", opponent_account_id: null, is_final_battle: false },
+        { battle_id: "b-null-opp", opponent_account_id: null },
       ],
     })),
     env,
@@ -181,13 +178,13 @@ test("battles with NULL opponent_account_id are projected", async () => {
   expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
-test("re-upload with same battle_id does not rollback batch (ON CONFLICT DO UPDATE)", async () => {
+test("re-upload with the same run artifact is idempotent", async () => {
   const first = await worker.fetch(
     buildUpload(payload({
       runId: "run-E",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-1", opponent_account_id: "opp-1", is_final_battle: false },
+        { battle_id: "b-1", opponent_account_id: "opp-1" },
       ],
     })),
     env,
@@ -199,7 +196,7 @@ test("re-upload with same battle_id does not rollback batch (ON CONFLICT DO UPDA
       runId: "run-E",
       uploader: "uploader-1",
       battles: [
-        { battle_id: "b-1", opponent_account_id: "opp-1", is_final_battle: true },
+        { battle_id: "b-1", opponent_account_id: "opp-1" },
       ],
     })),
     env,
@@ -207,40 +204,25 @@ test("re-upload with same battle_id does not rollback batch (ON CONFLICT DO UPDA
   expect(second.status).toBe(200);
 
   expect(await countRows(env.DB, "battles")).toBe(1);
-  const row = await selectFirst<{ is_final_battle: number }>(
-    env.DB,
-    "SELECT is_final_battle FROM battles WHERE battle_id = ?",
-    ["b-1"],
-  );
-  expect(row?.is_final_battle).toBe(1);
+  expect(await countRows(env.DB, "runs")).toBe(1);
 });
 
-test("sticky is_final_battle: once 1, stays 1 even on stale retransmit", async () => {
-  // Final upload arrives first.
-  await worker.fetch(
-    buildUpload(payload({
-      runId: "run-F",
-      uploader: "uploader-1",
-      battles: [{ battle_id: "b-final", opponent_account_id: "opp-2", is_final_battle: true }],
-    })),
-    env,
-  );
-  // Stale mid-run upload arrives later with is_final_battle=false — must not flip flag.
-  await worker.fetch(
-    buildUpload(payload({
-      runId: "run-F",
-      uploader: "uploader-1",
-      battles: [{ battle_id: "b-final", opponent_account_id: "opp-2", is_final_battle: false }],
-    })),
-    env,
-  );
+test("re-upload with the same run id but different artifact is rejected", async () => {
+  const firstPayload = payload({
+    runId: "run-F",
+    uploader: "uploader-1",
+    battles: [{ battle_id: "b-1", opponent_account_id: "opp-1" }],
+  }) as Record<string, unknown>;
+  const first = await worker.fetch(buildUpload(firstPayload), env);
+  expect(first.status).toBe(200);
 
-  const row = await selectFirst<{ is_final_battle: number }>(
-    env.DB,
-    "SELECT is_final_battle FROM battles WHERE battle_id = ?",
-    ["b-final"],
-  );
-  expect(row?.is_final_battle).toBe(1);
+  const secondPayload = {
+    ...firstPayload,
+    artifact_bytes: [9, 9, 9],
+  };
+  const second = await worker.fetch(buildUpload(secondPayload), env);
+  expect(second.status).toBe(409);
+  expect(await second.json()).toEqual({ error: "run_bundle_conflict" });
 });
 
 test("uploading a run without battles only writes the run projection", async () => {

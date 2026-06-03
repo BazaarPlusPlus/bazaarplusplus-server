@@ -5,7 +5,7 @@ import { optionalTrimmedString } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
 
 import type { DeliveryRow } from "./delivery";
-import { readOptionalJsonObject } from "./delivery";
+import { PeekMaxItems, readOptionalJsonObject } from "./delivery";
 
 function parseSnapshotIds(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) {
@@ -39,6 +39,9 @@ export async function handleConfirmBazaarDbSnapshots(
   const snapshotIds = parseSnapshotIds(body.snapshot_ids);
   if (snapshotIds == null) {
     return jsonError("missing_snapshot_ids");
+  }
+  if (snapshotIds.length > PeekMaxItems) {
+    return jsonError("too_many_snapshot_ids");
   }
 
   const nowUtc = new Date().toISOString();

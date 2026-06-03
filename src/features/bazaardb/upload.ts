@@ -22,6 +22,31 @@ function ok(snapshotId: string, uploadedAtUtc: string): Response {
   return json({ status: "ok", snapshot_id: snapshotId, uploaded_at_utc: uploadedAtUtc });
 }
 
+function validateSnapshotBodyId(body: Uint8Array, expectedSnapshotId: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return "invalid_snapshot_body";
+  }
+
+  if (typeof parsed !== "object" || parsed == null) {
+    return "invalid_snapshot_body";
+  }
+
+  const snapshot = (parsed as Record<string, unknown>).snapshot;
+  if (typeof snapshot !== "object" || snapshot == null) {
+    return "invalid_snapshot_body";
+  }
+
+  const bodySnapshotId = (snapshot as Record<string, unknown>).id;
+  if (typeof bodySnapshotId !== "string" || bodySnapshotId.trim() !== expectedSnapshotId) {
+    return "snapshot_id_mismatch";
+  }
+
+  return null;
+}
+
 export async function handleUploadBazaarDbSnapshot(
   request: Request,
   env: Env,
@@ -53,6 +78,10 @@ export async function handleUploadBazaarDbSnapshot(
   }
   if (body.byteLength > MaxSnapshotBodyBytes) {
     return jsonError("payload_too_large", 413);
+  }
+  const bodyError = validateSnapshotBodyId(body, normalizedSnapshotId);
+  if (bodyError != null) {
+    return jsonError(bodyError);
   }
 
   const uploadId = crypto.randomUUID();
