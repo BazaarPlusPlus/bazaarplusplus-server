@@ -3,8 +3,9 @@
 - This is the V4 mod-facing backend. V3 (`bazaarplusplus-mod/ModCFServerV3/`) is frozen — do not port V3 quirks here unless they appear in `docs/specs/2026-05-25-v4-server-split-design.md`.
 - `Env` types in `src/env.ts` are the only place to declare bindings/secrets. If a handler reads an env field that's not in `Env`, that's a bug.
 - The wire contract in `docs/api-reference.md` is the single source of truth. Field renames in test fixtures without updating the doc are bugs.
-- Battle INSERTs in `runBundles/upload.ts` must always include `ON CONFLICT(battle_id) DO UPDATE` — without it, the entire D1 batch (including the `runs` upsert) rolls back on duplicate. See spec Section 4.4 point 1.
-- `is_final_battle` upserts must use `MAX(battles.is_final_battle, excluded.is_final_battle)` — sticky semantics. Unconditional overwrite is a bug: late-arriving non-final retransmits would otherwise flip a final battle back to 0. See spec Section 4.4 point 2.
+- `runBundles/upload.ts` treats `runs.run_id` as immutable: same `run_id` + same artifact hash is idempotent; same `run_id` + different artifact hash returns 409 `run_bundle_conflict`.
+- Battle INSERTs in `runBundles/upload.ts` must keep `ON CONFLICT(battle_id) DO UPDATE` so duplicate battle projections within a valid new run do not rollback the D1 batch.
+- Bundle-final battle metadata is not part of the current V4 mod-facing wire contract. Do not reintroduce it without updating `docs/api-reference.md`, server tests, and mod client tests together.
 - Battle projection is full-ingest: every valid `battle_projections[]` item should be upserted into `battles` regardless of opponent account. Do not reintroduce opponent allow-list filtering without updating the API doc, schema, and tests together.
 - `customMetadata` on R2 puts is intentionally empty. V3 wrote `retention_days` here, but no code ever read it. R2 lifecycle lives in the CF dashboard.
 
