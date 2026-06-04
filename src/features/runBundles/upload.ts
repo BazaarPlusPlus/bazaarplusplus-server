@@ -3,7 +3,7 @@ import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { toBase64Url } from "../../crypto/base64";
 import { sha256Base64 } from "../../crypto/hash";
 import type { Env } from "../../env";
-import { json, jsonError, readJson } from "../../http/json";
+import { json, jsonError } from "../../http/json";
 import {
   normalizeIsoDateTime,
   optionalFiniteNumber,
@@ -18,7 +18,6 @@ type RawRunBundleRequest = {
   player_account_id?: unknown;
   submitted_at_utc?: unknown;
   artifact_codec?: unknown;
-  artifact_bytes?: unknown;
   run_projection?: Record<string, unknown>;
   battle_projections?: unknown;
 };
@@ -53,6 +52,9 @@ type ExistingRunRow = {
   payload_hash: string;
   object_key: string;
 };
+
+const RunBundleArtifactContentType = "application/x-bpp-runbundle+msgpack+gzip";
+const MaxRunBundleArtifactBytes = 8 * 1024 * 1024;
 
 const RUNS_INSERT_SQL = `
   INSERT INTO runs (
@@ -112,11 +114,63 @@ async function findExistingRun(env: Env, runId: string): Promise<ExistingRunRow 
     .first<ExistingRunRow>();
 }
 
+function isMultipart(request: Request): boolean {
+  return (request.headers.get("content-type") ?? "")
+    .toLowerCase()
+    .startsWith("multipart/form-data");
+}
+
+function isFilePart(value: unknown): value is File {
+  if (typeof value !== "object" || value == null) {
+    return false;
+  }
+
+  const candidate = value as { arrayBuffer?: unknown; type?: unknown };
+  return typeof candidate.arrayBuffer === "function" && typeof candidate.type === "string";
+}
+
+async function readMultipartRunBundle(request: Request): Promise<{
+  rawBody: RawRunBundleRequest;
+  artifactBytes: Uint8Array;
+}> {
+  if (!isMultipart(request)) {
+    throw jsonError("unsupported_content_type", 415);
+  }
+
+  const form = await request.formData();
+  const metadataPart = form.get("metadata");
+  const artifactPart = form.get("artifact");
+  if (typeof metadataPart !== "string" || !isFilePart(artifactPart)) {
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  let rawBody: RawRunBundleRequest;
+  try {
+    rawBody = JSON.parse(metadataPart) as RawRunBundleRequest;
+  } catch {
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  if (artifactPart.type !== RunBundleArtifactContentType) {
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  const artifactBytes = new Uint8Array(await artifactPart.arrayBuffer());
+  if (
+    artifactBytes.byteLength === 0 ||
+    artifactBytes.byteLength > MaxRunBundleArtifactBytes
+  ) {
+    throw jsonError("payload_too_large", 413);
+  }
+
+  return { rawBody, artifactBytes };
+}
+
 export async function handleUploadRunBundle(
   request: Request,
   env: Env,
 ): Promise<Response> {
-  const rawBody = (await readJson(request)) as RawRunBundleRequest;
+  const { rawBody, artifactBytes } = await readMultipartRunBundle(request);
   const phaseStart = Date.now();
 
   const outer = parseBody(rawBody, {
@@ -124,10 +178,6 @@ export async function handleUploadRunBundle(
     player_account_id: { type: "string", errorCode: "invalid_run_bundle_request" },
     submitted_at_utc: { type: "string", errorCode: "invalid_run_bundle_request" },
     artifact_codec: { type: "string", errorCode: "invalid_run_bundle_request" },
-    artifact_bytes: {
-      type: "byteArrayOrBase64",
-      errorCode: "invalid_run_bundle_request",
-    },
   });
 
   const runProjectionRaw =
@@ -145,7 +195,8 @@ export async function handleUploadRunBundle(
   if (
     submittedAtUtc == null ||
     endedAtUtc == null ||
-    (runProjectionRaw.started_at_utc != null && startedAtUtc == null)
+    (runProjectionRaw.started_at_utc != null && startedAtUtc == null) ||
+    outer.artifact_codec !== RunBundleArtifactContentType
   ) {
     return jsonError("invalid_run_bundle_request");
   }
@@ -167,7 +218,7 @@ export async function handleUploadRunBundle(
 
   const parseMs = Date.now() - phaseStart;
 
-  const payloadHash = await sha256Base64(outer.artifact_bytes.bytes);
+  const payloadHash = await sha256Base64(artifactBytes);
   const playerKeySegment = objectKeySegment(outer.player_account_id);
   const runKeySegment = objectKeySegment(inner.run_id);
   if (playerKeySegment == null || runKeySegment == null) {
@@ -188,7 +239,7 @@ export async function handleUploadRunBundle(
   let r2PutMs = 0;
   const r2Start = Date.now();
   try {
-    await env.RUN_BUNDLE_BUCKET.put(objectKey, outer.artifact_bytes.bytes, {
+    await env.RUN_BUNDLE_BUCKET.put(objectKey, artifactBytes, {
       httpMetadata: { contentType: outer.artifact_codec },
     });
     r2PutMs = Date.now() - r2Start;
@@ -215,7 +266,7 @@ export async function handleUploadRunBundle(
       outer.schema_version,
       objectKey,
       outer.artifact_codec,
-      outer.artifact_bytes.bytes.byteLength,
+      artifactBytes.byteLength,
       inner.status,
       optionalTrimmedString(runProjectionRaw.hero_id),
       optionalTrimmedString(runProjectionRaw.hero_name),
