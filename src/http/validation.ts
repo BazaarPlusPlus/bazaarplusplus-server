@@ -14,7 +14,6 @@ type FieldType =
   | "finiteNumber"
   | "finiteNumber?"
   | "base64"
-  | "byteArrayOrBase64"
   | "boolean?";
 
 type FieldValue<T extends FieldType> = T extends "string"
@@ -27,11 +26,9 @@ type FieldValue<T extends FieldType> = T extends "string"
         ? number | null
         : T extends "base64"
           ? Uint8Array
-          : T extends "byteArrayOrBase64"
-            ? { bytes: Uint8Array; encoding: "base64" | "byte-array" }
-            : T extends "boolean?"
-              ? boolean | null
-              : never;
+          : T extends "boolean?"
+            ? boolean | null
+            : never;
 
 type FieldSpec<T extends FieldType = FieldType> = {
   type: T;
@@ -76,26 +73,6 @@ function decodeBase64(value: unknown): Uint8Array | null {
   }
 }
 
-function decodeByteArray(value: unknown): Uint8Array | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-  const bytes = new Uint8Array(value.length);
-  for (let index = 0; index < value.length; index += 1) {
-    const current = value[index];
-    if (
-      typeof current !== "number" ||
-      !Number.isInteger(current) ||
-      current < 0 ||
-      current > 255
-    ) {
-      return null;
-    }
-    bytes[index] = current;
-  }
-  return bytes;
-}
-
 function parseField(
   fieldName: string,
   raw: unknown,
@@ -127,20 +104,6 @@ function parseField(
         fail(errorCode);
       }
       return bytes;
-    }
-    case "byteArrayOrBase64": {
-      if (typeof raw === "string") {
-        const bytes = decodeBase64(raw);
-        if (bytes == null) {
-          fail(errorCode);
-        }
-        return { bytes, encoding: "base64" as const };
-      }
-      const bytes = decodeByteArray(raw);
-      if (bytes == null) {
-        fail(errorCode);
-      }
-      return { bytes, encoding: "byte-array" as const };
     }
     case "boolean?":
       return typeof raw === "boolean" ? raw : null;

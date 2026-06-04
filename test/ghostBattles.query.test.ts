@@ -2,6 +2,10 @@ import { beforeEach, expect, test } from "vitest";
 import { env } from "cloudflare:test";
 
 import worker from "../src/index";
+import {
+  buildRunBundleMultipartUpload,
+  runBundleMetadata,
+} from "./helpers/runBundleUpload";
 import { resetTestState } from "./helpers/seed";
 
 beforeEach(async () => {
@@ -10,34 +14,26 @@ beforeEach(async () => {
 
 async function uploadFinalBattle(runId: string, uploader: string, opponent: string): Promise<void> {
   await worker.fetch(
-    new Request("https://example.com/run-bundles", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        schema_version: 4,
-        player_account_id: uploader,
-        submitted_at_utc: new Date().toISOString(),
-        artifact_codec: "application/x-bpp-runbundle+msgpack+gzip",
-        artifact_bytes: [1, 2, 3, 4],
-        run_projection: {
-          run_id: runId,
-          status: "completed",
-          ended_at_utc: new Date().toISOString(),
-        },
-        battle_projections: [{
-          battle_id: `${runId}-b1`,
-          run_id: runId,
-          recorded_at_utc: new Date().toISOString(),
-          player_account_id: uploader,
-          player_prestige: 6,
-          player_victories: 12,
-          opponent_account_id: opponent,
-          opponent_prestige: 7,
-          opponent_victories: 13,
-          result: "Won",
-          winner_combatant_id: "winner-combatant",
-          loser_combatant_id: "loser-combatant",
-        }],
+    buildRunBundleMultipartUpload({
+      metadata: runBundleMetadata({
+        runId,
+        uploader,
+        battles: [
+          {
+            battle_id: `${runId}-b1`,
+            run_id: runId,
+            recorded_at_utc: new Date().toISOString(),
+            player_account_id: uploader,
+            player_prestige: 6,
+            player_victories: 12,
+            opponent_account_id: opponent,
+            opponent_prestige: 7,
+            opponent_victories: 13,
+            result: "Won",
+            winner_combatant_id: "winner-combatant",
+            loser_combatant_id: "loser-combatant",
+          },
+        ],
       }),
     }),
     env,
