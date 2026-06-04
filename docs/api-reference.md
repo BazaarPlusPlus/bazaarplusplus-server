@@ -27,17 +27,25 @@ No error variants.
 
 Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D1 failure triggers best-effort R2 cleanup.
 
-**Auth:** None. `player_account_id` required in body.
+**Auth:** None. `player_account_id` required in the `metadata` part.
 
-### Request body (JSON)
+### Request body (multipart/form-data)
+
+| Part | Content-Type | Required | Body |
+|---|---|---|
+| `metadata` | `application/json` or omitted by platform string part | yes | UTF-8 JSON with fields below |
+| `artifact` | `application/x-bpp-runbundle+msgpack+gzip` | yes | Raw gzip MessagePack artifact bytes; filename `run-bundle.mpack.gz` |
+
+The endpoint rejects legacy `application/json` run-bundle bodies with `415 { "error": "unsupported_content_type" }`.
+
+**`metadata` JSON fields**
 
 | Field | Type | Required |
 |---|---|---|
-| `schema_version` | number (finite integer) | yes |
+| `schema_version` | number (finite integer; current mod sends `5`) | yes |
 | `player_account_id` | string (non-empty) | yes |
 | `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | yes |
-| `artifact_codec` | string | yes |
-| `artifact_bytes` | base64 string or byte array | yes |
+| `artifact_codec` | string; must equal `application/x-bpp-runbundle+msgpack+gzip` | yes |
 | `run_projection` | object (see below) | no (defaults to `{}`) |
 | `battle_projections` | array of battle objects (see below) | no (defaults to `[]`) |
 
@@ -105,19 +113,22 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 
 | Status | `error` code | Condition |
 |---|---|---|
-| 400 | `invalid_run_bundle_request` | Missing/invalid top-level field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`, `artifact_bytes`), invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, or `player_account_id`/`run_id` produces an unsafe key segment |
+| 400 | `invalid_run_bundle_request` | Missing/invalid multipart part, missing/invalid metadata field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`), invalid artifact content type, invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, or `player_account_id`/`run_id` produces an unsafe key segment |
 | 400 | `battle_id_required` | A battle in `battle_projections` has no `battle_id` |
 | 400 | `battle_run_id_mismatch` | A battle's `run_id` does not match `run_projection.run_id` |
+| 413 | `payload_too_large` | Artifact part is empty or larger than 8 MiB |
+| 415 | `unsupported_content_type` | Request is not `multipart/form-data` |
 | 409 | `run_bundle_conflict` | The `run_id` already exists with a different artifact hash |
 | 500 | (rethrown) | R2 put failure or D1 batch failure after best-effort cleanup |
 
-### V3 → V4 deltas
+### V3 → V4/V5 deltas
 
 - `player_account_id` no longer accepts `"anonymous-player"` sentinel; server rejects empty/missing with `invalid_run_bundle_request`. Mod must skip upload if account id is unavailable.
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
 - Bundle-final battle metadata is no longer part of the V4 mod-facing wire contract.
 - Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.
 - R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
+- JSON `artifact_bytes` upload bodies removed in V5; artifact bytes are transmitted only as the multipart `artifact` part.
 
 ---
 
@@ -241,7 +252,7 @@ Upload one BazaarDB snapshot DTO. The body is stored mostly as opaque JSON bytes
 
 ### Request body
 
-`Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. Max body size is 4 MiB. Empty bodies are rejected. The server minimally parses the JSON and requires `snapshot.id` to equal the `:snapshot_id` path parameter; the rest of the DTO is stored opaquely.
+`Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. The mod preserves the full local PNG but sends an upload image derivative capped at 2 MiB; `image.content_type` can be `image/png` or `image/jpeg`. Max body size is 4 MiB. Empty bodies are rejected. The server minimally parses the JSON and requires `snapshot.id` to equal the `:snapshot_id` path parameter; the rest of the DTO is stored opaquely.
 
 Example shape:
 
