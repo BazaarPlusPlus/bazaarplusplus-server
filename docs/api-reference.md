@@ -38,6 +38,8 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 
 The endpoint rejects legacy `application/json` run-bundle bodies with `415 { "error": "unsupported_content_type" }`.
 
+Only the `artifact` part's Content-Type is validated; the `metadata` part is accepted as any string part (its Content-Type is not inspected), and the `artifact` filename is informational (client-supplied, server-ignored).
+
 **`metadata` JSON fields**
 
 | Field | Type | Required |
@@ -225,7 +227,7 @@ No request body.
 | Status | `error` code | Condition |
 |---|---|---|
 | 400 | `bad_request` | Malformed percent-encoding in `:battle_id` path segment |
-| 404 | `battle_not_found` | No battle row with that `battle_id` in D1 |
+| 404 | `battle_not_found` | No battle (joined to its run) with that `battle_id` in D1 — either the battle row is missing or its `run_id` has no matching `runs` row |
 | 410 | `artifact_expired` | Battle row exists but `RUN_BUNDLE_BUCKET.head(object_key)` returned null (object deleted by R2 lifecycle) |
 
 ### V3 → V4 deltas
@@ -299,7 +301,9 @@ Example shape:
 }
 ```
 
-Re-uploading an existing `snapshot_id` is a no-op for every state (`pending`, leased, `done`, `failed`): the server returns 200 and does not replace or revive the existing row/object.
+Re-uploading an existing `snapshot_id` is a no-op regardless of delivery state or outstanding lease (`pending`, `done`, `failed`, or a leased `pending` row — `leased` is not a distinct `delivery_state` value, just a `pending` row carrying `lease_peek_id`/`lease_until_utc`): the server returns 200 and does not replace or revive the existing row/object.
+
+Idempotency takes precedence over validation: once a row exists for `snapshot_id`, the endpoint returns 200 before checking `Content-Type`, body size, or body contents, so the 4xx conditions below apply only to a `snapshot_id` that is not already stored.
 
 ### Errors
 
@@ -326,7 +330,7 @@ Claim the next BazaarDB delivery batch. At most one unexpired peek batch may be 
 { "max_items": 10 }
 ```
 
-`max_items` defaults to 10 and may only lower the service-side maximum.
+`max_items` defaults to 10, is floored to an integer, and is clamped to the range 1–10 (non-finite or non-numeric values fall back to 10).
 
 ### Response 200 with items
 

@@ -1,1 +1,15 @@
-.rules
+# Project Rules
+
+- This is the V4 mod-facing backend. V3 is frozen — its mod-repo source was removed after V4 launched, so do not port V3 quirks here unless they appear in `../docs/specs/2026-05-25-v4-server-split-design.md`.
+- `Env` types in `src/env.ts` are the only place to declare bindings/secrets. If a handler reads an env field that's not in `Env`, that's a bug.
+- The wire contract in `docs/api-reference.md` is the single source of truth. Field renames in test fixtures without updating the doc are bugs.
+- `runBundles/upload.ts` treats `runs.run_id` as immutable: same `run_id` + same artifact hash is idempotent; same `run_id` + different artifact hash returns 409 `run_bundle_conflict`.
+- Battle INSERTs in `runBundles/upload.ts` must keep `ON CONFLICT(battle_id) DO UPDATE` so duplicate battle projections within a valid new run do not rollback the D1 batch.
+- Bundle-final battle metadata is not part of the current V4 mod-facing wire contract. Do not reintroduce it without updating `docs/api-reference.md`, server tests, and mod client tests together.
+- Battle projection is full-ingest: every valid `battle_projections[]` item should be upserted into `battles` regardless of opponent account. Do not reintroduce opponent allow-list filtering without updating the API doc, schema, and tests together.
+- R2 puts set only `httpMetadata.contentType`; `customMetadata` is intentionally **not written**. V3 wrote `retention_days` there, but no code ever read it. R2 lifecycle lives in the CF dashboard.
+
+# Pull Request Hygiene
+
+- Clear, correctly capitalized, imperative PR title with no conventional-commit prefix and no trailing punctuation.
+- Include a `Release Notes:` section as the final body section with one bullet: `Added`/`Fixed`/`Improved` for user-facing changes, or `N/A` for backend-internal changes.

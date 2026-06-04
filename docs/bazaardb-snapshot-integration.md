@@ -155,7 +155,6 @@ Delivery is **at-least-once**, so BazaarDB should deduplicate by `snapshot_id`.
 | 400 | Malformed request | Fix the request body |
 | 401 | Invalid or missing bearer token | Check your credentials |
 | 409 | Outstanding peek lease exists | Confirm the outstanding peek or wait for lease expiry |
-| 429 | Rate limited | Back off and retry after the `Retry-After` header value |
 | 500 | Server error | Retry with exponential backoff |
 
 ## Recommended Pull Job
@@ -200,7 +199,7 @@ type BazaarDbSnapshotUploadRequest = {
     };
   };
   image: {
-    content_type: "image/png";
+    content_type: "image/png" | "image/jpeg";  // server stores opaquely; the mod may send a JPEG derivative
     encoding: "base64";
     data_base64: string;
   };
