@@ -46,6 +46,7 @@ type BattleProjection = {
   result?: unknown;
   winner_combatant_id?: unknown;
   loser_combatant_id?: unknown;
+  is_final_battle?: unknown;
 };
 
 type ExistingRunRow = {
@@ -73,8 +74,8 @@ const BATTLE_INSERT_SQL = `
     player_prestige, player_victories,
     opponent_name, opponent_account_id, opponent_hero, opponent_rank, opponent_rating, opponent_level,
     opponent_prestige, opponent_victories,
-    result, winner_combatant_id, loser_combatant_id, updated_at_utc
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    result, winner_combatant_id, loser_combatant_id, is_final_battle, updated_at_utc
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(battle_id) DO UPDATE SET
     run_id = excluded.run_id,
     recorded_at_utc = excluded.recorded_at_utc,
@@ -98,6 +99,7 @@ const BATTLE_INSERT_SQL = `
     result = excluded.result,
     winner_combatant_id = excluded.winner_combatant_id,
     loser_combatant_id = excluded.loser_combatant_id,
+    is_final_battle = MAX(battles.is_final_battle, excluded.is_final_battle),
     updated_at_utc = excluded.updated_at_utc
 `;
 
@@ -290,6 +292,8 @@ export async function handleUploadRunBundle(
   // Statements 1..N: one upsert per battle projection.
   for (const battle of battleProjections) {
     const opponentAccountId = optionalTrimmedString(battle.opponent_account_id);
+    const isFinalBattle =
+      battle.is_final_battle === true || battle.is_final_battle === 1 ? 1 : 0;
 
     statements.push(
       env.DB.prepare(BATTLE_INSERT_SQL).bind(
@@ -316,6 +320,7 @@ export async function handleUploadRunBundle(
         optionalTrimmedString(battle.result),
         optionalTrimmedString(battle.winner_combatant_id),
         optionalTrimmedString(battle.loser_combatant_id),
+        isFinalBattle,
         nowUtc,
       ),
     );

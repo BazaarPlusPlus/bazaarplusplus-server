@@ -98,6 +98,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `result` | string | |
 | `winner_combatant_id` | string | |
 | `loser_combatant_id` | string | |
+| `is_final_battle` | boolean | optional; stored as a sticky marker: once true for a `battle_id`, later uploads cannot reset it to false |
 
 ### Response 200 (accepted)
 
@@ -127,7 +128,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 
 - `player_account_id` no longer accepts `"anonymous-player"` sentinel; server rejects empty/missing with `invalid_run_bundle_request`. Mod must skip upload if account id is unavailable.
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
-- Bundle-final battle metadata is no longer part of the V4 mod-facing wire contract.
+- Bundle-final battle metadata is carried as `is_final_battle`; the old V3 `is_bundle_final_battle` name is not consumed or returned.
 - Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.
 - R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
 - JSON `artifact_bytes` upload bodies removed in V5; artifact bytes are transmitted only as the multipart `artifact` part.
@@ -174,7 +175,8 @@ Query battles where the given player was the opponent. Returns battles recorded 
       "opponent_victories": "number | null",
       "result": "string | null",
       "winner_combatant_id": "string | null",
-      "loser_combatant_id": "string | null"
+      "loser_combatant_id": "string | null",
+      "is_final_battle": "boolean"
     }
   ]
 }
@@ -190,7 +192,7 @@ Rows ordered by `recorded_at_utc DESC, battle_id DESC`.
 
 ### V3 → V4 deltas
 
-- Bundle-final battle metadata is no longer returned.
+- Bundle-final battle metadata is returned as `battles[].is_final_battle`; the old V3 `is_bundle_final_battle` name is not returned.
 - `battles[].replay_available` removed (was dead field; mod side should hardcode `ReplayAvailable = true` locally).
 - `battles[].player_account_id_in_payload` removed.
 - Lookback window hardcoded to 5 days (was `GHOST_QUERY_LOOKBACK_DAYS` env var in V3).

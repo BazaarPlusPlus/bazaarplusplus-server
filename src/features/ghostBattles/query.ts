@@ -27,6 +27,7 @@ type GhostBattleRow = {
   result: string | null;
   winner_combatant_id: string | null;
   loser_combatant_id: string | null;
+  is_final_battle: number;
 };
 
 export async function handleQueryGhostBattles(
@@ -54,7 +55,7 @@ export async function handleQueryGhostBattles(
         player_prestige, player_victories,
         opponent_name, opponent_account_id, opponent_hero, opponent_rank,
         opponent_rating, opponent_level, opponent_prestige, opponent_victories,
-        result, winner_combatant_id, loser_combatant_id
+        result, winner_combatant_id, loser_combatant_id, is_final_battle
       FROM battles
       WHERE opponent_account_id = ?
         AND recorded_at_utc >= ?
@@ -89,6 +90,7 @@ export async function handleQueryGhostBattles(
     result: row.result,
     winner_combatant_id: row.winner_combatant_id,
     loser_combatant_id: row.loser_combatant_id,
+    is_final_battle: row.is_final_battle === 1,
   }));
 
   logInfo("ghost_battles.query", {
