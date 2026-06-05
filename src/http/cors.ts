@@ -1,6 +1,7 @@
 const ALLOWED_METHODS = "GET, POST, OPTIONS";
 const ALLOWED_HEADERS = [
   "content-type",
+  // Reserved for signed mod-facing endpoints; no handler consumes these today.
   "x-bpp-timestamp",
   "x-bpp-content-sha256",
   "x-bpp-signature",

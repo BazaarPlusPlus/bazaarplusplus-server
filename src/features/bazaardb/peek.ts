@@ -1,17 +1,16 @@
 import { createR2Presigner } from "../../crypto/presign";
 import type { Env } from "../../env";
 import { requireBearer } from "../../http/auth";
-import { json } from "../../http/json";
+import { json, readOptionalJsonObject } from "../../http/json";
 import { logInfo, logWarn } from "../../observability";
 
 import {
-  BazaarDbBucketName,
+  type ClaimedDeliveryRow,
   createPeekId,
   type DeliveryRow,
   LeaseSeconds,
   MaxDeliveryAttempts,
   type OutstandingLeaseRow,
-  readOptionalJsonObject,
   requestedPeekLimit,
 } from "./delivery";
 
@@ -34,18 +33,27 @@ async function failMaxAttemptRows(env: Env, nowUtc: string): Promise<void> {
     .bind(nowUtc, nowUtc, nowUtc, MaxDeliveryAttempts)
     .all<DeliveryRow>();
 
-  for (const row of failed.results) {
-    try {
-      await env.BAZAARDB_BUCKET.delete(row.r2_key);
-    } catch (error) {
-      logWarn("bazaardb.peek", {
-        snapshot_id: row.snapshot_id,
-        r2_key: row.r2_key,
-        error: String(error),
-        outcome: "failed_r2_delete_error",
-      });
-    }
+  if (failed.results.length > 0) {
+    logWarn("bazaardb.peek", {
+      failed_count: failed.results.length,
+      outcome: "max_delivery_attempts_failed",
+    });
   }
+
+  await Promise.all(
+    failed.results.map(async (row) => {
+      try {
+        await env.BAZAARDB_BUCKET.delete(row.r2_key);
+      } catch (error) {
+        logWarn("bazaardb.peek", {
+          snapshot_id: row.snapshot_id,
+          r2_key: row.r2_key,
+          error: String(error),
+          outcome: "failed_r2_delete_error",
+        });
+      }
+    }),
+  );
 }
 
 async function findOutstandingLease(
@@ -74,6 +82,7 @@ export async function handlePeekBazaarDbSnapshots(
   const unauthorized = requireBearer(request, env, "BAZAARDB_PULL_TOKEN");
   if (unauthorized) return unauthorized;
 
+  const presigner = createR2Presigner(env, env.BAZAARDB_BUCKET_NAME);
   const phaseStart = Date.now();
   const requested = await readOptionalJsonObject(request);
   const maxItems = requestedPeekLimit(requested.max_items);
@@ -104,7 +113,7 @@ export async function handlePeekBazaarDbSnapshots(
         WHERE delivery_state = 'pending'
           AND lease_until_utc >= ?
       )
-      RETURNING snapshot_id, r2_key
+      RETURNING snapshot_id, r2_key, uploaded_at_utc
     `,
   )
     .bind(
@@ -116,7 +125,7 @@ export async function handlePeekBazaarDbSnapshots(
       maxItems,
       nowUtc,
     )
-    .all<DeliveryRow>();
+    .all<ClaimedDeliveryRow>();
 
   if (claim.results.length === 0) {
     const outstanding = await findOutstandingLease(env, nowUtc);
@@ -133,27 +142,17 @@ export async function handlePeekBazaarDbSnapshots(
     return json({ peek_id: null, items: [] });
   }
 
-  const claimedRows = await env.DB.prepare(
-    `
-      SELECT snapshot_id, r2_key
-      FROM bazaardb_delivery
-      WHERE lease_peek_id = ?
-        AND delivery_state = 'pending'
-      ORDER BY uploaded_at_utc, snapshot_id
-    `,
-  )
-    .bind(peekId)
-    .all<DeliveryRow>();
-
-  const presigner = createR2Presigner(env, BazaarDbBucketName);
-  const items = [];
-  for (const row of claimedRows.results) {
+  const claimedRows = [...claim.results].sort((a, b) => {
+    const uploaded = a.uploaded_at_utc.localeCompare(b.uploaded_at_utc);
+    return uploaded === 0 ? a.snapshot_id.localeCompare(b.snapshot_id) : uploaded;
+  });
+  const items = await Promise.all(claimedRows.map(async (row) => {
     const signed = await presigner.sign(row.r2_key, LeaseSeconds);
-    items.push({
+    return {
       snapshot_id: row.snapshot_id,
       download_url: signed.url,
-    });
-  }
+    };
+  }));
 
   logInfo("bazaardb.peek", {
     peek_id: peekId,

@@ -2,6 +2,7 @@ import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
 import { objectKeySegment } from "../../http/validation";
 import { logInfo, logWarn } from "../../observability";
+import { putThenProject } from "../../storage/putThenProject";
 
 const MaxSnapshotBodyBytes = 4 * 1024 * 1024;
 
@@ -10,12 +11,15 @@ function isApplicationJson(request: Request): boolean {
   return mediaType === "application/json";
 }
 
-async function snapshotExists(env: Env, snapshotId: string): Promise<{ uploaded_at_utc: string } | null> {
+async function snapshotExists(
+  env: Env,
+  snapshotId: string,
+): Promise<{ uploaded_at_utc: string; r2_key: string } | null> {
   return env.DB.prepare(
-    "SELECT uploaded_at_utc FROM bazaardb_delivery WHERE snapshot_id = ? LIMIT 1",
+    "SELECT uploaded_at_utc, r2_key FROM bazaardb_delivery WHERE snapshot_id = ? LIMIT 1",
   )
     .bind(snapshotId)
-    .first<{ uploaded_at_utc: string }>();
+    .first<{ uploaded_at_utc: string; r2_key: string }>();
 }
 
 function ok(snapshotId: string, uploadedAtUtc: string): Response {
@@ -87,28 +91,52 @@ export async function handleUploadBazaarDbSnapshot(
   const uploadId = crypto.randomUUID();
   const r2Key = `bazaardb/snapshots/${normalizedSnapshotId}/${uploadId}.json`;
   const r2Start = Date.now();
-  await env.BAZAARDB_BUCKET.put(r2Key, body, {
-    httpMetadata: { contentType: "application/json" },
-  });
-  const r2PutMs = Date.now() - r2Start;
+  let r2PutMs = 0;
 
   const uploadedAtUtc = new Date().toISOString();
-  const d1Start = Date.now();
-  try {
-    await env.DB.prepare(
-      `
-        INSERT INTO bazaardb_delivery (
-          snapshot_id, r2_key, content_type, body_bytes,
-          delivery_state, uploaded_at_utc, state_updated_at_utc
-        ) VALUES (?, ?, 'application/json', ?, 'pending', ?, ?)
-      `,
-    )
-      .bind(normalizedSnapshotId, r2Key, body.byteLength, uploadedAtUtc, uploadedAtUtc)
-      .run();
-  } catch (error) {
-    try {
-      await env.BAZAARDB_BUCKET.delete(r2Key);
-    } catch (cleanupError) {
+  let d1InsertMs = 0;
+  const projectResult = await putThenProject({
+    bucket: env.BAZAARDB_BUCKET,
+    objectKey: r2Key,
+    value: body,
+    putOptions: { httpMetadata: { contentType: "application/json" } },
+    project: async () => {
+      const d1Start = Date.now();
+      const result = await env.DB.prepare(
+        `
+          INSERT INTO bazaardb_delivery (
+            snapshot_id, r2_key, content_type, body_bytes,
+            delivery_state, uploaded_at_utc, state_updated_at_utc
+          ) VALUES (?, ?, 'application/json', ?, 'pending', ?, ?)
+        `,
+      )
+        .bind(normalizedSnapshotId, r2Key, body.byteLength, uploadedAtUtc, uploadedAtUtc)
+        .run();
+      d1InsertMs = Date.now() - d1Start;
+      return result;
+    },
+    findCommitted: () => snapshotExists(env, normalizedSnapshotId),
+    isObjectReferenced: (committed) => committed.r2_key === r2Key,
+    onPutSucceeded: () => {
+      r2PutMs = Date.now() - r2Start;
+    },
+    onProjectObjectKept: ({ error }) => {
+      logWarn("bazaardb.snapshot_upload", {
+        snapshot_id: normalizedSnapshotId,
+        r2_key: r2Key,
+        error: String(error),
+        outcome: "d1_insert_failed_existing_object_kept",
+      });
+    },
+    onProjectObjectDeleted: ({ error }) => {
+      logWarn("bazaardb.snapshot_upload", {
+        snapshot_id: normalizedSnapshotId,
+        r2_key: r2Key,
+        error: String(error),
+        outcome: "d1_insert_failed_r2_cleaned",
+      });
+    },
+    onProjectObjectOrphaned: ({ error, cleanupError }) => {
       logWarn("bazaardb.snapshot_upload", {
         snapshot_id: normalizedSnapshotId,
         r2_key: r2Key,
@@ -116,9 +144,20 @@ export async function handleUploadBazaarDbSnapshot(
         cleanup_error: String(cleanupError),
         outcome: "d1_insert_failed_r2_orphaned",
       });
-    }
+    },
+    onReferenceLookupFailed: ({ error, referenceLookupError }) => {
+      logWarn("bazaardb.snapshot_upload", {
+        snapshot_id: normalizedSnapshotId,
+        r2_key: r2Key,
+        error: String(error),
+        reference_lookup_error: String(referenceLookupError),
+        outcome: "d1_insert_failed_reference_lookup_failed",
+      });
+    },
+  });
 
-    const racedExisting = await snapshotExists(env, normalizedSnapshotId);
+  if (!projectResult.ok) {
+    const racedExisting = projectResult.committed;
     if (racedExisting) {
       return ok(normalizedSnapshotId, racedExisting.uploaded_at_utc);
     }
@@ -126,13 +165,11 @@ export async function handleUploadBazaarDbSnapshot(
     logWarn("bazaardb.snapshot_upload", {
       snapshot_id: normalizedSnapshotId,
       r2_key: r2Key,
-      error: String(error),
+      error: String(projectResult.error),
       outcome: "d1_insert_failed",
     });
     return jsonError("db_insert_failed", 500);
   }
-  const d1InsertMs = Date.now() - d1Start;
-
   logInfo("bazaardb.snapshot_upload", {
     snapshot_id: normalizedSnapshotId,
     r2_key: r2Key,

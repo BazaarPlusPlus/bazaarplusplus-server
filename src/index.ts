@@ -8,56 +8,94 @@ import { handleHealth } from "./features/health";
 import { handleUploadRunBundle } from "./features/runBundles/upload";
 import { preflight, withCors } from "./http/cors";
 import { jsonError } from "./http/json";
+import { logError } from "./observability";
 
 type StaticRoute = {
   method: string;
-  path: string;
-  handle: (request: Request, env: Env) => Promise<Response> | Response;
+  pattern: RegExp;
+  paramNames?: string[];
+  decodeErrorCode?: string;
+  handle: (
+    request: Request,
+    env: Env,
+    params: Record<string, string>,
+  ) => Promise<Response> | Response;
 };
 
-const StaticRoutes: StaticRoute[] = [
-  { method: "GET", path: "/health", handle: () => handleHealth() },
-  { method: "POST", path: "/run-bundles", handle: handleUploadRunBundle },
-  { method: "GET", path: "/ghost-battles", handle: handleQueryGhostBattles },
-  { method: "POST", path: "/bazaardb/peek", handle: handlePeekBazaarDbSnapshots },
-  { method: "POST", path: "/bazaardb/confirm", handle: handleConfirmBazaarDbSnapshots },
+const Routes: StaticRoute[] = [
+  { method: "GET", pattern: /^\/health$/, handle: () => handleHealth() },
+  { method: "POST", pattern: /^\/run-bundles$/, handle: handleUploadRunBundle },
+  { method: "GET", pattern: /^\/ghost-battles$/, handle: handleQueryGhostBattles },
+  { method: "POST", pattern: /^\/bazaardb\/peek$/, handle: handlePeekBazaarDbSnapshots },
+  { method: "POST", pattern: /^\/bazaardb\/confirm$/, handle: handleConfirmBazaarDbSnapshots },
+  {
+    method: "POST",
+    pattern: /^\/bazaardb\/snapshots\/([^/]+)$/,
+    paramNames: ["snapshot_id"],
+    decodeErrorCode: "invalid_snapshot_id",
+    handle: (request, env, params) =>
+      handleUploadBazaarDbSnapshot(request, env, params.snapshot_id),
+  },
+  {
+    method: "POST",
+    pattern: /^\/ghost-battles\/([^/]+)\/replay-link$/,
+    paramNames: ["battle_id"],
+    decodeErrorCode: "bad_request",
+    handle: (request, env, params) =>
+      handleCreateReplayLink(request, env, params.battle_id),
+  },
 ];
+
+function matchRoute(
+  route: StaticRoute,
+  method: string,
+  pathname: string,
+): Record<string, string> | null | Response {
+  if (route.method !== method) {
+    return null;
+  }
+
+  const match = route.pattern.exec(pathname);
+  if (match == null) {
+    return null;
+  }
+
+  const params: Record<string, string> = {};
+  for (let index = 0; index < (route.paramNames?.length ?? 0); index += 1) {
+    try {
+      params[route.paramNames![index]] = decodeURIComponent(match[index + 1] ?? "");
+    } catch {
+      return jsonError(route.decodeErrorCode ?? "bad_request", 400);
+    }
+  }
+
+  return params;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") return preflight(request);
+    const url = new URL(request.url);
     try {
-      const url = new URL(request.url);
-      const route = StaticRoutes.find(
-        (r) => r.method === request.method && r.path === url.pathname,
-      );
-      if (route) return withCors(request, await route.handle(request, env));
-
-      const bazaarDbSnapshotMatch = url.pathname.match(/^\/bazaardb\/snapshots\/([^/]+)$/);
-      if (request.method === "POST" && bazaarDbSnapshotMatch) {
-        let snapshotId: string;
-        try {
-          snapshotId = decodeURIComponent(bazaarDbSnapshotMatch[1] ?? "");
-        } catch {
-          return withCors(request, jsonError("invalid_snapshot_id", 400));
+      for (const route of Routes) {
+        const match = matchRoute(route, request.method, url.pathname);
+        if (match instanceof Response) {
+          return withCors(request, match);
         }
-        return withCors(request, await handleUploadBazaarDbSnapshot(request, env, snapshotId));
-      }
-
-      const replayLinkMatch = url.pathname.match(/^\/ghost-battles\/([^/]+)\/replay-link$/);
-      if (request.method === "POST" && replayLinkMatch) {
-        let battleId: string;
-        try {
-          battleId = decodeURIComponent(replayLinkMatch[1] ?? "");
-        } catch {
-          return withCors(request, jsonError("bad_request", 400));
+        if (match != null) {
+          return withCors(request, await route.handle(request, env, match));
         }
-        return withCors(request, await handleCreateReplayLink(request, env, battleId));
       }
 
       return withCors(request, jsonError("not_found", 404));
     } catch (error) {
       if (error instanceof Response) return withCors(request, error);
+      logError("worker.fetch", {
+        method: request.method,
+        path: url.pathname,
+        error: String(error),
+        outcome: "unhandled_error",
+      });
       throw error;
     }
   },

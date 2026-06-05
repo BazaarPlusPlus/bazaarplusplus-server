@@ -20,6 +20,8 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations(migrationsPath),
+          RUN_BUNDLE_BUCKET_NAME: "bazaarplusplus-run-bundles-v4",
+          BAZAARDB_BUCKET_NAME: "bazaarplusplus-bazaardb-snapshots-v4",
           R2_ACCOUNT_ID: "test-account-id",
           R2_ACCESS_KEY_ID: "test-access-key-id",
           R2_SECRET_ACCESS_KEY: "test-secret-access-key",

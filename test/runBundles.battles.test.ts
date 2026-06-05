@@ -1,6 +1,9 @@
 import { beforeEach, expect, test } from "vitest";
 import { env } from "cloudflare:test";
 
+import { sha256Base64 } from "../src/crypto/hash";
+import type { Env } from "../src/env";
+import { handleUploadRunBundle } from "../src/features/runBundles/upload";
 import worker from "../src/index";
 import {
   countRows,
@@ -197,6 +200,75 @@ test("re-upload with the same run artifact is idempotent", async () => {
   expect(await countRows(env.DB, "runs")).toBe(1);
 });
 
+test("idempotent re-upload does not refresh battle projections", async () => {
+  const first = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-idempotent-projection",
+        uploader: "uploader-1",
+        battles: [{ battle_id: "b-original", opponent_account_id: "opp-1" }],
+      }),
+    }),
+    env,
+  );
+  expect(first.status).toBe(200);
+
+  const second = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-idempotent-projection",
+        uploader: "uploader-1",
+        battles: [{ battle_id: "b-replacement", opponent_account_id: "opp-2" }],
+      }),
+    }),
+    env,
+  );
+  expect(second.status).toBe(200);
+
+  expect(await countRows(env.DB, "runs")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(1);
+  const row = await selectFirst<{ battle_id: string; opponent_account_id: string | null }>(
+    env.DB,
+    "SELECT battle_id, opponent_account_id FROM battles WHERE run_id = ?",
+    ["run-idempotent-projection"],
+  );
+  expect(row).toEqual({ battle_id: "b-original", opponent_account_id: "opp-1" });
+});
+
+test("different runs with identical artifact bytes get distinct object keys", async () => {
+  const artifactBytes = new Uint8Array([7, 7, 7, 7]);
+  const first = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-same-artifact-a",
+        uploader: "uploader-1",
+        battles: [],
+      }),
+      artifactBytes,
+    }),
+    env,
+  );
+  const second = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-same-artifact-b",
+        uploader: "uploader-2",
+        battles: [],
+      }),
+      artifactBytes,
+    }),
+    env,
+  );
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+
+  const firstBody = (await first.json()) as { object_key: string };
+  const secondBody = (await second.json()) as { object_key: string };
+  expect(firstBody.object_key).not.toBe(secondBody.object_key);
+  expect(await env.RUN_BUNDLE_BUCKET.head(firstBody.object_key)).not.toBeNull();
+  expect(await env.RUN_BUNDLE_BUCKET.head(secondBody.object_key)).not.toBeNull();
+});
+
 test("re-upload with the same run id but different artifact is rejected", async () => {
   const firstMetadata = metadata({
     runId: "run-F",
@@ -239,4 +311,67 @@ test("uploading a run without battles only writes the run projection", async () 
     ["run-G"],
   );
   expect(row?.player_account_id).toBe("uploader-2");
+});
+
+test("raced idempotent upload deletes only its own uncommitted object", async () => {
+  const artifactBytes = new Uint8Array([1, 2, 3, 4]);
+  const payloadHash = await sha256Base64(artifactBytes);
+  const committedObjectKey = "run-bundles/00000000-0000-4000-8000-000000000000.mpack.gz";
+  let findExistingRunCalls = 0;
+  let putObjectKey: string | null = null;
+  const deletedObjectKeys: string[] = [];
+
+  const fakeStatement = {
+    bind: () => ({
+      first: async () => {
+        findExistingRunCalls += 1;
+        return findExistingRunCalls === 1
+          ? null
+          : { payload_hash: payloadHash, object_key: committedObjectKey };
+      },
+    }),
+  };
+  const fakeEnv = {
+    DB: {
+      prepare: () => fakeStatement,
+      batch: async () => {
+        throw new Error("UNIQUE constraint failed: runs.run_id");
+      },
+    },
+    RUN_BUNDLE_BUCKET: {
+      put: async (objectKey: string) => {
+        putObjectKey = objectKey;
+      },
+      delete: async (objectKey: string) => {
+        deletedObjectKeys.push(objectKey);
+      },
+    },
+    BAZAARDB_BUCKET: {},
+    RUN_BUNDLE_BUCKET_NAME: "bazaarplusplus-run-bundles-v4",
+    BAZAARDB_BUCKET_NAME: "bazaarplusplus-bazaardb-snapshots-v4",
+    R2_ACCOUNT_ID: "test-account-id",
+    R2_ACCESS_KEY_ID: "test-access-key-id",
+    R2_SECRET_ACCESS_KEY: "test-secret-access-key",
+    BAZAARDB_PULL_TOKEN: "test-pull-token",
+  } as unknown as Env;
+
+  const response = await handleUploadRunBundle(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-raced-idempotent",
+        uploader: "uploader-1",
+        battles: [],
+      }),
+      artifactBytes,
+    }),
+    fakeEnv,
+  );
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    status: "accepted",
+    run_id: "run-raced-idempotent",
+    object_key: committedObjectKey,
+  });
+  expect(deletedObjectKeys).toEqual([putObjectKey]);
 });

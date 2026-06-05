@@ -108,7 +108,3 @@ export function parseClampedInteger(
 
   return Math.min(max, Math.max(min, parsed));
 }
-
-export function absolutePath(request: Request): string {
-  return new URL(request.url).pathname || "/";
-}

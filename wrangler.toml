@@ -11,6 +11,10 @@ enabled = true
 invocation_logs = true
 head_sampling_rate = 1.0
 
+[vars]
+RUN_BUNDLE_BUCKET_NAME = "bazaarplusplus-run-bundles-v4"
+BAZAARDB_BUCKET_NAME = "bazaarplusplus-bazaardb-snapshots-v4"
+
 [[routes]]
 pattern = "mod-api-v4.bazaarplusplus.com"
 custom_domain = true

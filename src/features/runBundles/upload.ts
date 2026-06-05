@@ -1,6 +1,5 @@
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
 
-import { toBase64Url } from "../../crypto/base64";
 import { sha256Base64 } from "../../crypto/hash";
 import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
@@ -12,6 +11,7 @@ import {
 } from "../../http/request";
 import { objectKeySegment, parseBody } from "../../http/validation";
 import { logInfo, logWarn } from "../../observability";
+import { putThenProject } from "../../storage/putThenProject";
 
 type RawRunBundleRequest = {
   schema_version?: unknown;
@@ -56,6 +56,8 @@ type ExistingRunRow = {
 
 const RunBundleArtifactContentType = "application/x-bpp-runbundle+msgpack+gzip";
 const MaxRunBundleArtifactBytes = 8 * 1024 * 1024;
+const MaxBattleProjections = 200;
+const MaxBattleRecordedAtFutureSkewMs = 10 * 60 * 1000;
 
 const RUNS_INSERT_SQL = `
   INSERT INTO runs (
@@ -131,6 +133,10 @@ function isFilePart(value: unknown): value is File {
   return typeof candidate.arrayBuffer === "function" && typeof candidate.type === "string";
 }
 
+function isAfterAllowedFutureSkew(isoDateTimeUtc: string, nowMs: number): boolean {
+  return Date.parse(isoDateTimeUtc) > nowMs + MaxBattleRecordedAtFutureSkewMs;
+}
+
 async function readMultipartRunBundle(request: Request): Promise<{
   rawBody: RawRunBundleRequest;
   artifactBytes: Uint8Array;
@@ -139,7 +145,17 @@ async function readMultipartRunBundle(request: Request): Promise<{
     throw jsonError("unsupported_content_type", 415);
   }
 
-  const form = await request.formData();
+  const declaredLength = Number.parseInt(request.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(declaredLength) && declaredLength > MaxRunBundleArtifactBytes) {
+    throw jsonError("payload_too_large", 413);
+  }
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    throw jsonError("invalid_run_bundle_request");
+  }
   const metadataPart = form.get("metadata");
   const artifactPart = form.get("artifact");
   if (typeof metadataPart !== "string" || !isFilePart(artifactPart)) {
@@ -206,54 +222,55 @@ export async function handleUploadRunBundle(
   const battleProjections: BattleProjection[] = Array.isArray(rawBody.battle_projections)
     ? (rawBody.battle_projections as BattleProjection[])
     : [];
+  if (battleProjections.length > MaxBattleProjections) {
+    return jsonError("too_many_battle_projections");
+  }
 
   // Validate each battle has battle_id and a run_id matching the run.
+  const validationNowMs = Date.now();
   for (const battle of battleProjections) {
     const battleId = optionalTrimmedString(battle.battle_id);
     if (!battleId) return jsonError("battle_id_required");
     const battleRunId = optionalTrimmedString(battle.run_id);
     if (battleRunId !== inner.run_id) return jsonError("battle_run_id_mismatch");
-    if (battle.recorded_at_utc != null && optionalIsoDateTime(battle.recorded_at_utc) == null) {
-      return jsonError("invalid_run_bundle_request");
+    if (battle.recorded_at_utc != null) {
+      const recordedAtUtc = optionalIsoDateTime(battle.recorded_at_utc);
+      if (
+        recordedAtUtc == null ||
+        isAfterAllowedFutureSkew(recordedAtUtc, validationNowMs)
+      ) {
+        return jsonError("invalid_run_bundle_request");
+      }
     }
   }
 
   const parseMs = Date.now() - phaseStart;
 
   const payloadHash = await sha256Base64(artifactBytes);
-  const playerKeySegment = objectKeySegment(outer.player_account_id);
-  const runKeySegment = objectKeySegment(inner.run_id);
-  if (playerKeySegment == null || runKeySegment == null) {
+  if (
+    objectKeySegment(outer.player_account_id) == null ||
+    objectKeySegment(inner.run_id) == null
+  ) {
     return jsonError("invalid_run_bundle_request");
   }
 
   const existingRun = await findExistingRun(env, inner.run_id);
   if (existingRun != null) {
     if (existingRun.payload_hash !== payloadHash) {
+      logWarn("run_bundles.upload", {
+        run_id: inner.run_id,
+        existing_object_key: existingRun.object_key,
+        outcome: "run_bundle_conflict",
+      });
       return jsonError("run_bundle_conflict", 409);
     }
 
     return json({ status: "accepted", run_id: inner.run_id, object_key: existingRun.object_key });
   }
-  const objectKey =
-    `run-bundles/${playerKeySegment}/${runKeySegment}/${toBase64Url(payloadHash)}.mpack.gz`;
+  const objectKey = `run-bundles/${crypto.randomUUID()}.mpack.gz`;
 
   let r2PutMs = 0;
   const r2Start = Date.now();
-  try {
-    await env.RUN_BUNDLE_BUCKET.put(objectKey, artifactBytes, {
-      httpMetadata: { contentType: outer.artifact_codec },
-    });
-    r2PutMs = Date.now() - r2Start;
-  } catch (error) {
-    logWarn("run_bundles.upload", {
-      run_id: inner.run_id,
-      object_key: objectKey,
-      error: String(error),
-      outcome: "r2_put_failed",
-    });
-    throw error;
-  }
 
   const nowUtc = new Date().toISOString();
 
@@ -326,27 +343,52 @@ export async function handleUploadRunBundle(
     );
   }
 
-  const d1Start = Date.now();
+  let d1BatchMs = 0;
   let battlesActuallyWritten = 0;
-  try {
-    const batchResults = await env.DB.batch(statements);
-    // Statement 0 is the runs insert; statements 1..battleProjections.length are battle upserts.
-    const battleResults = batchResults.slice(1, 1 + battleProjections.length);
-    battlesActuallyWritten = battleResults.reduce(
-      (sum, r) => sum + (r.meta?.changes ?? 0),
-      0,
-    );
-  } catch (error) {
-    // D1 failed after R2 put — best-effort cleanup so we don't leak an orphan.
-    try {
-      await env.RUN_BUNDLE_BUCKET.delete(objectKey);
+  const projectResult = await putThenProject({
+    bucket: env.RUN_BUNDLE_BUCKET,
+    objectKey,
+    value: artifactBytes,
+    putOptions: { httpMetadata: { contentType: outer.artifact_codec } },
+    project: async () => {
+      const d1Start = Date.now();
+      const result = await env.DB.batch(statements);
+      d1BatchMs = Date.now() - d1Start;
+      return result;
+    },
+    findCommitted: () => findExistingRun(env, inner.run_id),
+    isObjectReferenced: (committed) => committed.object_key === objectKey,
+    onPutSucceeded: () => {
+      r2PutMs = Date.now() - r2Start;
+    },
+    onPutFailed: (error) => {
       logWarn("run_bundles.upload", {
         run_id: inner.run_id,
         object_key: objectKey,
         error: String(error),
-        outcome: "d1_batch_failed_r2_cleaned",
+        outcome: "r2_put_failed",
       });
-    } catch (cleanupError) {
+    },
+    onProjectObjectKept: ({ error }) => {
+      logWarn("run_bundles.upload", {
+        run_id: inner.run_id,
+        object_key: objectKey,
+        error: String(error),
+        outcome: "d1_batch_failed_existing_object_kept",
+      });
+    },
+    onProjectObjectDeleted: ({ error, committed }) => {
+      logWarn("run_bundles.upload", {
+        run_id: inner.run_id,
+        object_key: objectKey,
+        error: String(error),
+        outcome:
+          committed == null
+            ? "d1_batch_failed_r2_cleaned"
+            : "d1_batch_failed_raced_object_cleaned",
+      });
+    },
+    onProjectObjectOrphaned: ({ error, cleanupError }) => {
       logWarn("run_bundles.upload", {
         run_id: inner.run_id,
         object_key: objectKey,
@@ -354,9 +396,28 @@ export async function handleUploadRunBundle(
         cleanup_error: String(cleanupError),
         outcome: "d1_batch_failed_r2_orphaned",
       });
-    }
+    },
+    onReferenceLookupFailed: ({ error, referenceLookupError }) => {
+      logWarn("run_bundles.upload", {
+        run_id: inner.run_id,
+        object_key: objectKey,
+        error: String(error),
+        reference_lookup_error: String(referenceLookupError),
+        outcome: "d1_batch_failed_reference_lookup_failed",
+      });
+    },
+  });
 
-    const racedExistingRun = await findExistingRun(env, inner.run_id);
+  if (projectResult.ok) {
+    const batchResults = projectResult.value;
+    // Statement 0 is the runs insert; statements 1..battleProjections.length are battle upserts.
+    const battleResults = batchResults.slice(1, 1 + battleProjections.length);
+    battlesActuallyWritten = battleResults.reduce(
+      (sum, r) => sum + (r.meta?.changes ?? 0),
+      0,
+    );
+  } else {
+    const racedExistingRun = projectResult.committed;
     if (racedExistingRun != null) {
       if (racedExistingRun.payload_hash === payloadHash) {
         return json({
@@ -366,13 +427,17 @@ export async function handleUploadRunBundle(
         });
       }
 
+      logWarn("run_bundles.upload", {
+        run_id: inner.run_id,
+        existing_object_key: racedExistingRun.object_key,
+        attempted_object_key: objectKey,
+        outcome: "run_bundle_conflict_after_race",
+      });
       return jsonError("run_bundle_conflict", 409);
     }
 
-    throw error;
+    throw projectResult.error;
   }
-  const d1BatchMs = Date.now() - d1Start;
-
   logInfo("run_bundles.upload", {
     run_id: inner.run_id,
     phase_ms: { parse: parseMs, r2_put: r2PutMs, d1_batch: d1BatchMs, total: Date.now() - phaseStart },

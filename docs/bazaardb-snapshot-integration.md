@@ -113,7 +113,7 @@ If a previous batch is still leased and not yet confirmed, the server returns `4
 }
 ```
 
-To resolve a 409, either confirm (or partially confirm) the outstanding peek, or wait for its lease to expire. Once the lease expires, the unclaimed snapshots return to the pending queue and the next `peek` call will succeed.
+To resolve a 409, either confirm (or partially confirm) the outstanding peek, or wait for its lease to expire. Once the lease expires, unconfirmed snapshots return to the pending queue while they are still under the delivery-attempt cap. Each snapshot can be claimed at most 3 times; after that, the next `peek` marks it failed and deletes the stored object.
 
 ### Confirm
 
@@ -145,7 +145,7 @@ Response:
 
 `confirmed` only includes snapshot IDs that still match the active peek lease and have not already been confirmed.
 
-Delivery is **at-least-once**, so BazaarDB should deduplicate by `snapshot_id`.
+Delivery is **at-least-once within at most 3 peek claims**, so BazaarDB should deduplicate by `snapshot_id`.
 
 ### Error Handling
 
@@ -166,7 +166,7 @@ We recommend BazaarDB run a scheduled job every 1–5 minutes:
 3. Download each `download_url`
 4. Persist each Snapshot DTO
 5. Deduplicate by `snapshot_id`
-6. Call `POST /bazaardb/confirm` with the `snapshot_id`s that were successfully persisted (partial confirm is fine — unconfirmed items will be re-delivered after lease expiry)
+6. Call `POST /bazaardb/confirm` with the `snapshot_id`s that were successfully persisted (partial confirm is fine — unconfirmed items will be re-delivered after lease expiry until the 3-attempt cap is reached)
 7. Repeat on the next scheduled run
 
 ## Snapshot DTO Schema

@@ -1,10 +1,9 @@
 import { createR2Presigner } from "../../crypto/presign";
 import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
-import { logInfo } from "../../observability";
+import { logInfo, logWarn } from "../../observability";
 
 const ReplayTtlSeconds = 300;
-const RunBundleBucketName = "bazaarplusplus-run-bundles-v4";
 
 export async function handleCreateReplayLink(
   _request: Request,
@@ -27,20 +26,32 @@ export async function handleCreateReplayLink(
   const battleLookupMs = Date.now() - lookupStart;
 
   if (!row) {
+    logWarn("ghost_battles.replay_link", {
+      battle_id: battleId,
+      phase_ms: { battle_lookup: battleLookupMs, total: Date.now() - phaseStart },
+      outcome: "battle_not_found",
+    });
     return jsonError("battle_not_found", 404);
   }
 
   const head = await env.RUN_BUNDLE_BUCKET.head(row.object_key);
   if (head == null) {
+    logWarn("ghost_battles.replay_link", {
+      battle_id: battleId,
+      object_key: row.object_key,
+      phase_ms: { battle_lookup: battleLookupMs, total: Date.now() - phaseStart },
+      outcome: "artifact_expired",
+    });
     return jsonError("artifact_expired", 410);
   }
 
-  const presigner = createR2Presigner(env, RunBundleBucketName);
+  const presigner = createR2Presigner(env, env.RUN_BUNDLE_BUCKET_NAME);
   const { url, expiresAtUtc } = await presigner.sign(row.object_key, ReplayTtlSeconds);
 
   logInfo("ghost_battles.replay_link", {
+    battle_id: battleId,
     phase_ms: { battle_lookup: battleLookupMs, total: Date.now() - phaseStart },
-    presign_key_cached: false,
+    outcome: "ok",
   });
 
   return json({ download_url: url, expires_at_utc: expiresAtUtc });

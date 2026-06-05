@@ -1,11 +1,11 @@
 import type { Env } from "../../env";
 import { requireBearer } from "../../http/auth";
-import { json, jsonError } from "../../http/json";
+import { json, jsonError, readOptionalJsonObject } from "../../http/json";
 import { optionalTrimmedString } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
 
 import type { DeliveryRow } from "./delivery";
-import { PeekMaxItems, readOptionalJsonObject } from "./delivery";
+import { PeekMaxItems } from "./delivery";
 
 function parseSnapshotIds(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) {

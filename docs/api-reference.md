@@ -25,7 +25,7 @@ No error variants.
 
 ## POST /run-bundles
 
-Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D1 failure triggers best-effort R2 cleanup.
+Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D1 failure triggers best-effort R2 cleanup unless a raced committed run already references the same object.
 
 **Auth:** None. `player_account_id` required in the `metadata` part.
 
@@ -44,12 +44,12 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 
 | Field | Type | Required |
 |---|---|---|
-| `schema_version` | number (finite integer; current mod sends `5`) | yes |
+| `schema_version` | number (finite; integer not enforced — current mod sends `5`) | yes |
 | `player_account_id` | string (non-empty) | yes |
 | `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | yes |
 | `artifact_codec` | string; must equal `application/x-bpp-runbundle+msgpack+gzip` | yes |
 | `run_projection` | object (see below) | no (defaults to `{}`) |
-| `battle_projections` | array of battle objects (see below) | no (defaults to `[]`) |
+| `battle_projections` | array of battle objects (see below; max 200 items) | no (defaults to `[]`) |
 
 **`run_projection` fields** (all optional unless noted):
 
@@ -80,7 +80,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | defaults to server time |
 | `day` | number | |
 | `player_name` | string | |
-| `player_account_id` | string | uploader |
+| `player_account_id` | string | client-supplied value ignored; server always writes the metadata-level `player_account_id` |
 | `player_hero` | string | |
 | `player_rank` | string | |
 | `player_rating` | number | |
@@ -100,6 +100,8 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `loser_combatant_id` | string | |
 | `is_final_battle` | boolean | optional; stored as a sticky marker: once true for a `battle_id`, later uploads cannot reset it to false |
 
+For a `battle_id` collision, non-final battle fields use last-writer-wins upsert semantics; `is_final_battle` is the exception and remains sticky once true.
+
 ### Response 200 (accepted)
 
 ```json
@@ -110,16 +112,19 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 }
 ```
 
-`object_key` format: `run-bundles/<player_account_id>/<run_id>/<base64url(sha256)>.mpack.gz`
+`object_key` format for new uploads: `run-bundles/<uuid>.mpack.gz`. The object key intentionally omits `player_account_id`, `run_id`, and artifact hash, so replay presigned URL paths do not expose uploader identity or create shared keys across unrelated runs. The `player_account_id` and `run_id` inputs still must match `^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$`.
+
+`run_id` is immutable. Re-uploading the same `run_id` with the same artifact hash returns the existing `object_key` and does not refresh `runs` or `battles` projections. Re-uploading the same `run_id` with a different artifact hash returns 409 `run_bundle_conflict`.
 
 ### Errors
 
 | Status | `error` code | Condition |
 |---|---|---|
-| 400 | `invalid_run_bundle_request` | Missing/invalid multipart part, missing/invalid metadata field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`), invalid artifact content type, invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, or `player_account_id`/`run_id` produces an unsafe key segment |
+| 400 | `invalid_run_bundle_request` | Malformed multipart body, missing/invalid multipart part, missing/invalid metadata field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`), invalid artifact content type, invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, far-future battle timestamp, or `player_account_id`/`run_id` fails storage key safety validation |
 | 400 | `battle_id_required` | A battle in `battle_projections` has no `battle_id` |
 | 400 | `battle_run_id_mismatch` | A battle's `run_id` does not match `run_projection.run_id` |
-| 413 | `payload_too_large` | Artifact part is empty or larger than 8 MiB |
+| 400 | `too_many_battle_projections` | More than 200 battle projections were supplied |
+| 413 | `payload_too_large` | Declared request body exceeds 8 MiB, or artifact part is empty or larger than 8 MiB |
 | 415 | `unsupported_content_type` | Request is not `multipart/form-data` |
 | 409 | `run_bundle_conflict` | The `run_id` already exists with a different artifact hash |
 | 500 | (rethrown) | R2 put failure or D1 batch failure after best-effort cleanup |
@@ -222,7 +227,7 @@ No request body.
 }
 ```
 
-`download_url` is a 5-minute SigV4 presigned R2 URL. The mod GETs this URL directly; no Worker proxy.
+`download_url` is a 5-minute SigV4 presigned R2 URL. The mod GETs this URL directly; no Worker proxy. After the signed URL expires, R2 may return 403; clients should request a fresh replay-link instead of scheduling downloads against the exact `expires_at_utc` boundary.
 
 ### Errors
 
@@ -252,7 +257,7 @@ Upload one BazaarDB snapshot DTO. The body is stored mostly as opaque JSON bytes
 
 | Param | Type | Notes |
 |---|---|---|
-| `:snapshot_id` | string | must match `^[A-Za-z0-9._-]{1,128}$`; malformed percent-encoding or unsafe decoded id → 400 `invalid_snapshot_id` |
+| `:snapshot_id` | string | must match `^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$`; malformed percent-encoding or unsafe decoded id → 400 `invalid_snapshot_id` |
 
 ### Request body
 
@@ -367,7 +372,7 @@ Claim the next BazaarDB delivery batch. At most one unexpired peek batch may be 
 }
 ```
 
-Call `confirm` for successfully ingested DTOs or wait for the lease to expire.
+Call `confirm` for successfully ingested DTOs or wait for the lease to expire. A pending row can be claimed at most 3 times; after that, the next `peek` marks it `failed` with `failure_reason='max_delivery_attempts'` and deletes its R2 object.
 
 ### Errors
 
@@ -419,4 +424,4 @@ Confirm the subset of DTOs from a peek batch that BazaarDB successfully fetched 
 - Deleted routes: `POST /bazaardb-screenshots` and `GET /bazaardb/manifest`.
 - The server no longer stores BazaarDB metadata columns; `bazaardb_delivery` is only a delivery queue/ledger.
 - Private R2 objects contain the full Snapshot DTO and are deleted after confirm.
-- Delivery is at-least-once; BazaarDB ingest must be idempotent by `snapshot_id`.
+- Delivery is at-least-once within at most 3 peek claims; BazaarDB ingest must be idempotent by `snapshot_id`.

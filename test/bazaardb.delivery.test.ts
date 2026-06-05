@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import { env } from "cloudflare:test";
 
+import { handleUploadBazaarDbSnapshot } from "../src/features/bazaardb/upload";
 import worker from "../src/index";
 import { countRows, resetTestState, selectFirst } from "./helpers/seed";
 
@@ -43,15 +44,16 @@ async function seedDelivery(
   return r2Key;
 }
 
+function peekRequest(maxItems = 10): Request {
+  return new Request("https://example.com/bazaardb/peek", {
+    method: "POST",
+    headers: { ...PullAuth, "content-type": "application/json" },
+    body: JSON.stringify({ max_items: maxItems }),
+  });
+}
+
 async function peek(maxItems = 10): Promise<Response> {
-  return worker.fetch(
-    new Request("https://example.com/bazaardb/peek", {
-      method: "POST",
-      headers: { ...PullAuth, "content-type": "application/json" },
-      body: JSON.stringify({ max_items: maxItems }),
-    }),
-    env,
-  );
+  return worker.fetch(peekRequest(maxItems), env);
 }
 
 async function confirm(peekId: string, snapshotIds: string[]): Promise<Response> {
@@ -106,6 +108,14 @@ test("snapshot upload guards id, content type, payload size, and old routes", as
   const invalidId = await worker.fetch(snapshotUpload("bad%2Fid", "{}"), env);
   expect(invalidId.status).toBe(400);
   expect(await invalidId.json()).toEqual({ error: "invalid_snapshot_id" });
+
+  const dotId = await handleUploadBazaarDbSnapshot(
+    snapshotUpload("dot-placeholder", JSON.stringify({ snapshot: { id: "." } })),
+    env,
+    ".",
+  );
+  expect(dotId.status).toBe(400);
+  expect(await dotId.json()).toEqual({ error: "invalid_snapshot_id" });
 
   const invalidBody = await worker.fetch(snapshotUpload("snap-body", "{}"), env);
   expect(invalidBody.status).toBe(400);
@@ -206,6 +216,42 @@ test("POST /bazaardb/peek claims oldest pending rows and returns presigned URLs"
     { snapshot_id: "snap-a", lease_peek_id: body.peek_id, delivery_attempts: 1 },
     { snapshot_id: "snap-b", lease_peek_id: body.peek_id, delivery_attempts: 1 },
   ]);
+});
+
+test("peek fails before claim or max-attempt cleanup when R2 presign secrets are missing", async () => {
+  const r2Key = await seedDelivery("snap-secret-missing", "2026-06-03T00:00:01.000Z", {
+    attempts: 3,
+  });
+  const badEnv = {
+    ...env,
+    R2_SECRET_ACCESS_KEY: "",
+  };
+
+  await expect(worker.fetch(peekRequest(), badEnv)).rejects.toThrow("R2 SigV4 secrets missing");
+
+  const row = await selectFirst<{
+    delivery_state: string;
+    delivery_attempts: number;
+    lease_peek_id: string | null;
+    lease_until_utc: string | null;
+    failure_reason: string | null;
+  }>(
+    env.DB,
+    `
+      SELECT delivery_state, delivery_attempts, lease_peek_id, lease_until_utc, failure_reason
+      FROM bazaardb_delivery
+      WHERE snapshot_id = ?
+    `,
+    ["snap-secret-missing"],
+  );
+  expect(row).toEqual({
+    delivery_state: "pending",
+    delivery_attempts: 3,
+    lease_peek_id: null,
+    lease_until_utc: null,
+    failure_reason: null,
+  });
+  expect(await env.BAZAARDB_BUCKET.head(r2Key)).not.toBeNull();
 });
 
 test("peek returns an empty batch when no rows are pending", async () => {
