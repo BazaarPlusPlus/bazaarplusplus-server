@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2026-03-28"
 workers_dev = false
 
+[placement]
+region = "aws:ap-east-1"
+
 [observability]
 enabled = true
 
