@@ -88,6 +88,51 @@ test("battles are projected with opponent account metadata", async () => {
   expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
+test("battle projections without a battle id are skipped while the run is still projected", async () => {
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: runBundleMetadata({
+        runId: "run-skip-bad-battle",
+        battles: [
+          { run_id: "run-skip-bad-battle", opponent_account_id: "missing-battle-id" },
+        ],
+      }),
+    }),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  expect(await countRows(env.DB, "runs")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(0);
+});
+
+test("battle projection run id mismatches are ignored in favor of the run projection id", async () => {
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: runBundleMetadata({
+        runId: "run-authoritative",
+        battles: [
+          {
+            battle_id: "battle-mismatched-run",
+            run_id: "stale-manifest-run",
+            recorded_at_utc: "2026-05-26T00:30:00.000Z",
+            opponent_account_id: "known-opponent",
+          },
+        ],
+      }),
+    }),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ run_id: string }>(
+    env.DB,
+    "SELECT run_id FROM battles WHERE battle_id = ?",
+    ["battle-mismatched-run"],
+  );
+  expect(row).toEqual({ run_id: "run-authoritative" });
+});
+
 test("battles project participant prestige, victories, and winner/loser ids", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({

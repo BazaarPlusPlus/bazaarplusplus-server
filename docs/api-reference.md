@@ -1,7 +1,7 @@
 # V4 API Reference
 
 **Host:** `mod-api-v4.bazaarplusplus.com`
-**Auth model:** No token auth for mod-facing endpoints. `POST /bazaardb/peek` and `POST /bazaardb/confirm` require a bearer token. All `player_account_id` fields are required; no sentinel fallbacks accepted.
+**Auth model:** No token auth for mod-facing endpoints. `POST /bazaardb/peek` and `POST /bazaardb/confirm` require a bearer token. All `player_account_id` fields are required; the server does not synthesize sentinel fallbacks.
 **Error shape:** `{ "error": "<code>" }` unless noted otherwise.
 **CORS:** All endpoints accept preflight (`OPTIONS`).
 
@@ -44,10 +44,10 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 
 | Field | Type | Required |
 |---|---|---|
-| `schema_version` | number (finite; integer not enforced — current mod sends `5`) | yes |
+| `schema_version` | number (finite; integer not enforced; defaults to current server schema when invalid/missing — current mod sends `5`) | no |
 | `player_account_id` | string (non-empty) | yes |
-| `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | yes |
-| `artifact_codec` | string; must equal `application/x-bpp-runbundle+msgpack+gzip` | yes |
+| `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing falls back to server receive time) | no |
+| `artifact_codec` | string; defaults to the multipart artifact Content-Type when invalid/missing | no |
 | `run_projection` | object (see below) | no (defaults to `{}`) |
 | `battle_projections` | array of battle objects (see below; max 200 items) | no (defaults to `[]`) |
 
@@ -56,8 +56,8 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | Field | Type |
 |---|---|
 | `run_id` | string (non-empty) | **required** |
-| `status` | string | **required** |
-| `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | **required** |
+| `status` | string; defaults to `completed` when invalid/missing |
+| `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing falls back to server receive time) |
 | `hero_id` | string |
 | `hero_name` | string |
 | `player_rank` | string |
@@ -75,9 +75,9 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 
 | Field | Type | Notes |
 |---|---|---|
-| `battle_id` | string | required; missing → 400 `battle_id_required` |
-| `run_id` | string | required; must equal `run_projection.run_id` or → 400 `battle_run_id_mismatch` |
-| `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | defaults to server time |
+| `battle_id` | string | missing/blank battle projections are skipped; the rest of the bundle is still accepted |
+| `run_id` | string | client-supplied value ignored; server always writes `run_projection.run_id` |
+| `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | invalid/missing/far-future values fall back to `submitted_at_utc` or server receive time |
 | `day` | number | |
 | `player_name` | string | |
 | `player_account_id` | string | client-supplied value ignored; server always writes the metadata-level `player_account_id` |
@@ -112,7 +112,7 @@ For a `battle_id` collision, non-final battle fields use last-writer-wins upsert
 }
 ```
 
-`object_key` format for new uploads: `run-bundles/<uuid>.mpack.gz`. The object key intentionally omits `player_account_id`, `run_id`, and artifact hash, so replay presigned URL paths do not expose uploader identity or create shared keys across unrelated runs. The `player_account_id` and `run_id` inputs still must match `^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$`.
+`object_key` format for new uploads: `run-bundles/<uuid>.mpack.gz`. The object key intentionally omits `player_account_id`, `run_id`, and artifact hash, so replay presigned URL paths do not expose uploader identity or create shared keys across unrelated runs.
 
 `run_id` is immutable. Re-uploading the same `run_id` with the same artifact hash returns the existing `object_key` and does not refresh `runs` or `battles` projections. Re-uploading the same `run_id` with a different artifact hash returns 409 `run_bundle_conflict`.
 
@@ -120,9 +120,7 @@ For a `battle_id` collision, non-final battle fields use last-writer-wins upsert
 
 | Status | `error` code | Condition |
 |---|---|---|
-| 400 | `invalid_run_bundle_request` | Malformed multipart body, missing/invalid multipart part, missing/invalid metadata field (`schema_version`, `player_account_id`, `submitted_at_utc`, `artifact_codec`), invalid artifact content type, invalid `run_id`/`status`/`ended_at_utc` in `run_projection`, invalid optional timestamp, far-future battle timestamp, or `player_account_id`/`run_id` fails storage key safety validation |
-| 400 | `battle_id_required` | A battle in `battle_projections` has no `battle_id` |
-| 400 | `battle_run_id_mismatch` | A battle's `run_id` does not match `run_projection.run_id` |
+| 400 | `invalid_run_bundle_request` | Malformed multipart body, missing/invalid multipart part, missing/invalid required field (`player_account_id` or `run_id`), or invalid artifact part Content-Type |
 | 400 | `too_many_battle_projections` | More than 200 battle projections were supplied |
 | 413 | `payload_too_large` | Declared request body exceeds 8 MiB, or artifact part is empty or larger than 8 MiB |
 | 415 | `unsupported_content_type` | Request is not `multipart/form-data` |
@@ -131,7 +129,7 @@ For a `battle_id` collision, non-final battle fields use last-writer-wins upsert
 
 ### V3 → V4/V5 deltas
 
-- `player_account_id` no longer accepts `"anonymous-player"` sentinel; server rejects empty/missing with `invalid_run_bundle_request`. Mod must skip upload if account id is unavailable.
+- `player_account_id` is required and non-empty. Mod must skip upload if account id is unavailable.
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
 - Bundle-final battle metadata is carried as `is_final_battle`; the old V3 `is_bundle_final_battle` name is not consumed or returned.
 - Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.

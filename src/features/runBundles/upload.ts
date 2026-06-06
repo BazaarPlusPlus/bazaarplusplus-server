@@ -9,7 +9,6 @@ import {
   optionalIsoDateTime,
   optionalTrimmedString,
 } from "../../http/request";
-import { objectKeySegment, parseBody } from "../../http/validation";
 import { logInfo, logWarn } from "../../observability";
 import { putThenProject } from "../../storage/putThenProject";
 
@@ -49,6 +48,14 @@ type BattleProjection = {
   is_final_battle?: unknown;
 };
 
+type RunBundleParts = {
+  metadata: string | null;
+  artifact: {
+    bytes: Uint8Array;
+    contentType: string;
+  } | null;
+};
+
 type ExistingRunRow = {
   payload_hash: string;
   object_key: string;
@@ -58,6 +65,7 @@ const RunBundleArtifactContentType = "application/x-bpp-runbundle+msgpack+gzip";
 const MaxRunBundleArtifactBytes = 8 * 1024 * 1024;
 const MaxBattleProjections = 200;
 const MaxBattleRecordedAtFutureSkewMs = 10 * 60 * 1000;
+const DefaultRunBundleSchemaVersion = 5;
 
 const RUNS_INSERT_SQL = `
   INSERT INTO runs (
@@ -124,17 +132,300 @@ function isMultipart(request: Request): boolean {
     .startsWith("multipart/form-data");
 }
 
-function isFilePart(value: unknown): value is File {
-  if (typeof value !== "object" || value == null) {
-    return false;
+function asciiBytes(value: string): Uint8Array {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index++) {
+    bytes[index] = value.charCodeAt(index) & 0x7f;
+  }
+  return bytes;
+}
+
+function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): number {
+  if (needle.length === 0) {
+    return from;
   }
 
-  const candidate = value as { arrayBuffer?: unknown; type?: unknown };
-  return typeof candidate.arrayBuffer === "function" && typeof candidate.type === "string";
+  const lastStart = haystack.length - needle.length;
+  for (let index = Math.max(0, from); index <= lastStart; index++) {
+    let matched = true;
+    for (let needleIndex = 0; needleIndex < needle.length; needleIndex++) {
+      if (haystack[index + needleIndex] !== needle[needleIndex]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function parseMultipartBoundary(contentType: string | null): string | null {
+  const match = contentType?.match(/(?:^|;)\s*boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = match?.[1] ?? match?.[2]?.trim();
+  return boundary && boundary.length > 0 ? boundary : null;
+}
+
+function parseHeaderBlock(headersText: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of headersText.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+    headers[line.slice(0, separator).trim().toLowerCase()] = line
+      .slice(separator + 1)
+      .trim();
+  }
+  return headers;
+}
+
+function parseContentDispositionName(contentDisposition: string | undefined): string | null {
+  const match = contentDisposition?.match(/(?:^|;)\s*name=(?:"([^"]*)"|([^;]+))/i);
+  const name = match?.[1] ?? match?.[2]?.trim();
+  return name && name.length > 0 ? name : null;
+}
+
+function findHeaderTerminator(
+  body: Uint8Array,
+  from: number,
+): { index: number; length: number } | null {
+  const crlf = asciiBytes("\r\n\r\n");
+  const lf = asciiBytes("\n\n");
+  const crlfIndex = indexOfBytes(body, crlf, from);
+  const lfIndex = indexOfBytes(body, lf, from);
+  if (crlfIndex < 0 && lfIndex < 0) {
+    return null;
+  }
+  if (crlfIndex >= 0 && (lfIndex < 0 || crlfIndex < lfIndex)) {
+    return { index: crlfIndex, length: crlf.length };
+  }
+  return { index: lfIndex, length: lf.length };
+}
+
+function findNextBoundary(
+  body: Uint8Array,
+  boundary: string,
+  from: number,
+): { index: number; prefixLength: number } | null {
+  const crlfBoundary = asciiBytes(`\r\n--${boundary}`);
+  const lfBoundary = asciiBytes(`\n--${boundary}`);
+  const crlfIndex = indexOfBytes(body, crlfBoundary, from);
+  const lfIndex = indexOfBytes(body, lfBoundary, from);
+  if (crlfIndex < 0 && lfIndex < 0) {
+    return null;
+  }
+  if (crlfIndex >= 0 && (lfIndex < 0 || crlfIndex < lfIndex)) {
+    return { index: crlfIndex, prefixLength: 2 };
+  }
+  return { index: lfIndex, prefixLength: 1 };
+}
+
+function parseMultipartBytes(body: Uint8Array, boundary: string): RunBundleParts | null {
+  const decoder = new TextDecoder();
+  const boundaryLine = asciiBytes(`--${boundary}`);
+  const parts: RunBundleParts = { metadata: null, artifact: null };
+  let cursor = indexOfBytes(body, boundaryLine, 0);
+  if (cursor < 0) {
+    return null;
+  }
+
+  while (cursor >= 0 && cursor < body.length) {
+    let afterBoundary = cursor + boundaryLine.length;
+    if (body[afterBoundary] === 45 && body[afterBoundary + 1] === 45) {
+      break;
+    }
+    if (body[afterBoundary] === 13 && body[afterBoundary + 1] === 10) {
+      afterBoundary += 2;
+    } else if (body[afterBoundary] === 10) {
+      afterBoundary += 1;
+    } else {
+      return null;
+    }
+
+    const headerTerminator = findHeaderTerminator(body, afterBoundary);
+    if (headerTerminator == null) {
+      return null;
+    }
+    const headers = parseHeaderBlock(
+      decoder.decode(body.slice(afterBoundary, headerTerminator.index)),
+    );
+    const partStart = headerTerminator.index + headerTerminator.length;
+    const nextBoundary = findNextBoundary(body, boundary, partStart);
+    if (nextBoundary == null) {
+      return null;
+    }
+
+    const name = parseContentDispositionName(headers["content-disposition"]);
+    const contentType = headers["content-type"]?.split(";")[0]?.trim() ?? "";
+    const partBytes = body.slice(partStart, nextBoundary.index);
+    if (name === "metadata") {
+      parts.metadata = decoder.decode(partBytes);
+    } else if (name === "artifact") {
+      parts.artifact = { bytes: partBytes, contentType };
+    }
+
+    cursor = nextBoundary.index + nextBoundary.prefixLength;
+  }
+
+  return parts;
 }
 
 function isAfterAllowedFutureSkew(isoDateTimeUtc: string, nowMs: number): boolean {
   return Date.parse(isoDateTimeUtc) > nowMs + MaxBattleRecordedAtFutureSkewMs;
+}
+
+function rejectInvalidRunBundle(reason: string, fields: Record<string, unknown> = {}): Response {
+  logWarn("run_bundles.upload.reject", {
+    reason,
+    error: "invalid_run_bundle_request",
+    ...fields,
+  });
+  return jsonError("invalid_run_bundle_request");
+}
+
+function schemaVersion(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : DefaultRunBundleSchemaVersion;
+}
+
+function normalizeTimestampOrFallback(
+  value: unknown,
+  fallbackUtc: string,
+): { value: string; normalized: boolean } {
+  const normalized = normalizeIsoDateTime(value);
+  return normalized == null
+    ? { value: fallbackUtc, normalized: true }
+    : { value: normalized, normalized: false };
+}
+
+function normalizeOptionalTimestamp(value: unknown): {
+  value: string | null;
+  normalized: boolean;
+} {
+  if (value == null || (typeof value === "string" && value.trim().length === 0)) {
+    return { value: null, normalized: false };
+  }
+
+  const normalized = optionalIsoDateTime(value);
+  return normalized == null
+    ? { value: null, normalized: true }
+    : { value: normalized, normalized: false };
+}
+
+function normalizeBattleRecordedAt(
+  value: unknown,
+  fallbackUtc: string,
+  validationNowMs: number,
+): { value: string; normalized: boolean } {
+  const normalized = optionalIsoDateTime(value);
+  if (normalized == null || isAfterAllowedFutureSkew(normalized, validationNowMs)) {
+    return { value: fallbackUtc, normalized: true };
+  }
+
+  return { value: normalized, normalized: false };
+}
+
+function decodeRunBundleParts(
+  parts: RunBundleParts,
+  failureFields: Record<string, unknown> = {},
+): {
+  rawBody: RawRunBundleRequest;
+  artifactBytes: Uint8Array;
+} {
+  if (parts.metadata == null || parts.artifact == null) {
+    logWarn("run_bundles.upload.reject", {
+      reason: "missing_or_invalid_parts",
+      error: "invalid_run_bundle_request",
+      metadata_present: parts.metadata != null,
+      artifact_present: parts.artifact != null,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  let rawBody: RawRunBundleRequest;
+  try {
+    rawBody = JSON.parse(parts.metadata) as RawRunBundleRequest;
+  } catch {
+    logWarn("run_bundles.upload.reject", {
+      reason: "metadata_json_parse_failed",
+      error: "invalid_run_bundle_request",
+      metadata_length: parts.metadata.length,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  if (parts.artifact.contentType !== RunBundleArtifactContentType) {
+    logWarn("run_bundles.upload.reject", {
+      reason: "artifact_content_type_mismatch",
+      error: "invalid_run_bundle_request",
+      artifact_content_type: parts.artifact.contentType,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  if (
+    parts.artifact.bytes.byteLength === 0 ||
+    parts.artifact.bytes.byteLength > MaxRunBundleArtifactBytes
+  ) {
+    throw jsonError("payload_too_large", 413);
+  }
+
+  return { rawBody, artifactBytes: parts.artifact.bytes };
+}
+
+async function readMultipartRunBundleFromBytes(
+  request: Request,
+  failureFields: Record<string, unknown>,
+): Promise<{
+  rawBody: RawRunBundleRequest;
+  artifactBytes: Uint8Array;
+}> {
+  const contentType = request.headers.get("content-type");
+  const boundary = parseMultipartBoundary(contentType);
+  if (boundary == null) {
+    logWarn("run_bundles.upload.reject", {
+      reason: "multipart_boundary_missing",
+      error: "invalid_run_bundle_request",
+      content_type: contentType,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  let body: Uint8Array;
+  try {
+    body = new Uint8Array(await request.arrayBuffer());
+  } catch {
+    logWarn("run_bundles.upload.reject", {
+      reason: "multipart_body_read_failed",
+      error: "invalid_run_bundle_request",
+      content_type: contentType,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  const parts = parseMultipartBytes(body, boundary);
+  if (parts == null) {
+    logWarn("run_bundles.upload.reject", {
+      reason: "multipart_parse_failed",
+      error: "invalid_run_bundle_request",
+      content_type: contentType,
+      declared_length: request.headers.get("content-length"),
+      parser: "bytes",
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
+  return decodeRunBundleParts(parts, { parser: "bytes", ...failureFields });
 }
 
 async function readMultipartRunBundle(request: Request): Promise<{
@@ -150,38 +441,7 @@ async function readMultipartRunBundle(request: Request): Promise<{
     throw jsonError("payload_too_large", 413);
   }
 
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    throw jsonError("invalid_run_bundle_request");
-  }
-  const metadataPart = form.get("metadata");
-  const artifactPart = form.get("artifact");
-  if (typeof metadataPart !== "string" || !isFilePart(artifactPart)) {
-    throw jsonError("invalid_run_bundle_request");
-  }
-
-  let rawBody: RawRunBundleRequest;
-  try {
-    rawBody = JSON.parse(metadataPart) as RawRunBundleRequest;
-  } catch {
-    throw jsonError("invalid_run_bundle_request");
-  }
-
-  if (artifactPart.type !== RunBundleArtifactContentType) {
-    throw jsonError("invalid_run_bundle_request");
-  }
-
-  const artifactBytes = new Uint8Array(await artifactPart.arrayBuffer());
-  if (
-    artifactBytes.byteLength === 0 ||
-    artifactBytes.byteLength > MaxRunBundleArtifactBytes
-  ) {
-    throw jsonError("payload_too_large", 413);
-  }
-
-  return { rawBody, artifactBytes };
+  return readMultipartRunBundleFromBytes(request, {});
 }
 
 export async function handleUploadRunBundle(
@@ -190,34 +450,29 @@ export async function handleUploadRunBundle(
 ): Promise<Response> {
   const { rawBody, artifactBytes } = await readMultipartRunBundle(request);
   const phaseStart = Date.now();
+  const nowUtc = new Date().toISOString();
+  const validationNowMs = Date.now();
 
-  const outer = parseBody(rawBody, {
-    schema_version: { type: "finiteNumber", errorCode: "invalid_run_bundle_request" },
-    player_account_id: { type: "string", errorCode: "invalid_run_bundle_request" },
-    submitted_at_utc: { type: "string", errorCode: "invalid_run_bundle_request" },
-    artifact_codec: { type: "string", errorCode: "invalid_run_bundle_request" },
-  });
+  const playerAccountId = optionalTrimmedString(rawBody.player_account_id);
+  if (playerAccountId == null) {
+    return rejectInvalidRunBundle("missing_player_account_id");
+  }
 
   const runProjectionRaw =
     typeof rawBody.run_projection === "object" && rawBody.run_projection != null
       ? rawBody.run_projection
       : {};
-  const inner = parseBody(runProjectionRaw, {
-    run_id: { type: "string", errorCode: "invalid_run_bundle_request" },
-    status: { type: "string", errorCode: "invalid_run_bundle_request" },
-    ended_at_utc: { type: "string", errorCode: "invalid_run_bundle_request" },
-  });
-  const submittedAtUtc = normalizeIsoDateTime(outer.submitted_at_utc);
-  const endedAtUtc = normalizeIsoDateTime(inner.ended_at_utc);
-  const startedAtUtc = optionalIsoDateTime(runProjectionRaw.started_at_utc);
-  if (
-    submittedAtUtc == null ||
-    endedAtUtc == null ||
-    (runProjectionRaw.started_at_utc != null && startedAtUtc == null) ||
-    outer.artifact_codec !== RunBundleArtifactContentType
-  ) {
-    return jsonError("invalid_run_bundle_request");
+  const runId = optionalTrimmedString(runProjectionRaw.run_id);
+  if (runId == null) {
+    return rejectInvalidRunBundle("missing_run_id");
   }
+  const status = optionalTrimmedString(runProjectionRaw.status) ?? "completed";
+  const artifactCodec = optionalTrimmedString(rawBody.artifact_codec)
+    ?? RunBundleArtifactContentType;
+
+  const submittedAt = normalizeTimestampOrFallback(rawBody.submitted_at_utc, nowUtc);
+  const endedAt = normalizeTimestampOrFallback(runProjectionRaw.ended_at_utc, nowUtc);
+  const startedAt = normalizeOptionalTimestamp(runProjectionRaw.started_at_utc);
 
   const battleProjections: BattleProjection[] = Array.isArray(rawBody.battle_projections)
     ? (rawBody.battle_projections as BattleProjection[])
@@ -226,88 +481,91 @@ export async function handleUploadRunBundle(
     return jsonError("too_many_battle_projections");
   }
 
-  // Validate each battle has battle_id and a run_id matching the run.
-  const validationNowMs = Date.now();
+  let skippedBattleProjections = 0;
+  let ignoredBattleRunIdMismatches = 0;
+  let normalizedTimestampFields = Number(submittedAt.normalized)
+    + Number(endedAt.normalized)
+    + Number(startedAt.normalized);
+  const validBattleProjections: Array<BattleProjection & { recorded_at_utc_normalized: string }> = [];
   for (const battle of battleProjections) {
     const battleId = optionalTrimmedString(battle.battle_id);
-    if (!battleId) return jsonError("battle_id_required");
-    const battleRunId = optionalTrimmedString(battle.run_id);
-    if (battleRunId !== inner.run_id) return jsonError("battle_run_id_mismatch");
-    if (battle.recorded_at_utc != null) {
-      const recordedAtUtc = optionalIsoDateTime(battle.recorded_at_utc);
-      if (
-        recordedAtUtc == null ||
-        isAfterAllowedFutureSkew(recordedAtUtc, validationNowMs)
-      ) {
-        return jsonError("invalid_run_bundle_request");
-      }
+    if (!battleId) {
+      skippedBattleProjections += 1;
+      continue;
     }
+
+    const battleRunId = optionalTrimmedString(battle.run_id);
+    if (battleRunId != null && battleRunId !== runId) {
+      ignoredBattleRunIdMismatches += 1;
+    }
+
+    const recordedAt = normalizeBattleRecordedAt(
+      battle.recorded_at_utc,
+      submittedAt.value,
+      validationNowMs,
+    );
+    if (recordedAt.normalized) {
+      normalizedTimestampFields += 1;
+    }
+    validBattleProjections.push({ ...battle, recorded_at_utc_normalized: recordedAt.value });
   }
 
   const parseMs = Date.now() - phaseStart;
 
   const payloadHash = await sha256Base64(artifactBytes);
-  if (
-    objectKeySegment(outer.player_account_id) == null ||
-    objectKeySegment(inner.run_id) == null
-  ) {
-    return jsonError("invalid_run_bundle_request");
-  }
 
-  const existingRun = await findExistingRun(env, inner.run_id);
+  const existingRun = await findExistingRun(env, runId);
   if (existingRun != null) {
     if (existingRun.payload_hash !== payloadHash) {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         existing_object_key: existingRun.object_key,
         outcome: "run_bundle_conflict",
       });
       return jsonError("run_bundle_conflict", 409);
     }
 
-    return json({ status: "accepted", run_id: inner.run_id, object_key: existingRun.object_key });
+    return json({ status: "accepted", run_id: runId, object_key: existingRun.object_key });
   }
   const objectKey = `run-bundles/${crypto.randomUUID()}.mpack.gz`;
 
   let r2PutMs = 0;
   const r2Start = Date.now();
 
-  const nowUtc = new Date().toISOString();
-
   const statements: D1PreparedStatement[] = [];
 
   // Statement 0: runs insert. Existing run_id is handled before R2 write.
   statements.push(
     env.DB.prepare(RUNS_INSERT_SQL).bind(
-      inner.run_id,
-      outer.player_account_id,
+      runId,
+      playerAccountId,
       payloadHash,
-      outer.schema_version,
+      schemaVersion(rawBody.schema_version),
       objectKey,
-      outer.artifact_codec,
+      artifactCodec,
       artifactBytes.byteLength,
-      inner.status,
+      status,
       optionalTrimmedString(runProjectionRaw.hero_id),
       optionalTrimmedString(runProjectionRaw.hero_name),
       optionalTrimmedString(runProjectionRaw.player_rank),
       optionalFiniteNumber(runProjectionRaw.player_rating),
       optionalFiniteNumber(runProjectionRaw.player_position),
-      startedAtUtc,
-      endedAtUtc,
+      startedAt.value,
+      endedAt.value,
       optionalFiniteNumber(runProjectionRaw.final_day),
       optionalFiniteNumber(runProjectionRaw.final_wins),
       optionalFiniteNumber(runProjectionRaw.final_losses),
       optionalTrimmedString(runProjectionRaw.final_player_rank),
       optionalFiniteNumber(runProjectionRaw.final_player_rating),
       optionalFiniteNumber(runProjectionRaw.final_player_position),
-      submittedAtUtc,
+      submittedAt.value,
       nowUtc,
       nowUtc,
     ),
   );
 
   // Statements 1..N: one upsert per battle projection.
-  for (const battle of battleProjections) {
+  for (const battle of validBattleProjections) {
     const opponentAccountId = optionalTrimmedString(battle.opponent_account_id);
     const isFinalBattle =
       battle.is_final_battle === true || battle.is_final_battle === 1 ? 1 : 0;
@@ -315,11 +573,11 @@ export async function handleUploadRunBundle(
     statements.push(
       env.DB.prepare(BATTLE_INSERT_SQL).bind(
         optionalTrimmedString(battle.battle_id),
-        inner.run_id,
-        optionalIsoDateTime(battle.recorded_at_utc) ?? nowUtc,
+        runId,
+        battle.recorded_at_utc_normalized,
         optionalFiniteNumber(battle.day),
         optionalTrimmedString(battle.player_name),
-        outer.player_account_id,
+        playerAccountId,
         optionalTrimmedString(battle.player_hero),
         optionalTrimmedString(battle.player_rank),
         optionalFiniteNumber(battle.player_rating),
@@ -349,21 +607,21 @@ export async function handleUploadRunBundle(
     bucket: env.RUN_BUNDLE_BUCKET,
     objectKey,
     value: artifactBytes,
-    putOptions: { httpMetadata: { contentType: outer.artifact_codec } },
+    putOptions: { httpMetadata: { contentType: artifactCodec } },
     project: async () => {
       const d1Start = Date.now();
       const result = await env.DB.batch(statements);
       d1BatchMs = Date.now() - d1Start;
       return result;
     },
-    findCommitted: () => findExistingRun(env, inner.run_id),
+    findCommitted: () => findExistingRun(env, runId),
     isObjectReferenced: (committed) => committed.object_key === objectKey,
     onPutSucceeded: () => {
       r2PutMs = Date.now() - r2Start;
     },
     onPutFailed: (error) => {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         object_key: objectKey,
         error: String(error),
         outcome: "r2_put_failed",
@@ -371,7 +629,7 @@ export async function handleUploadRunBundle(
     },
     onProjectObjectKept: ({ error }) => {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         object_key: objectKey,
         error: String(error),
         outcome: "d1_batch_failed_existing_object_kept",
@@ -379,7 +637,7 @@ export async function handleUploadRunBundle(
     },
     onProjectObjectDeleted: ({ error, committed }) => {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         object_key: objectKey,
         error: String(error),
         outcome:
@@ -390,7 +648,7 @@ export async function handleUploadRunBundle(
     },
     onProjectObjectOrphaned: ({ error, cleanupError }) => {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         object_key: objectKey,
         error: String(error),
         cleanup_error: String(cleanupError),
@@ -399,7 +657,7 @@ export async function handleUploadRunBundle(
     },
     onReferenceLookupFailed: ({ error, referenceLookupError }) => {
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         object_key: objectKey,
         error: String(error),
         reference_lookup_error: String(referenceLookupError),
@@ -410,8 +668,8 @@ export async function handleUploadRunBundle(
 
   if (projectResult.ok) {
     const batchResults = projectResult.value;
-    // Statement 0 is the runs insert; statements 1..battleProjections.length are battle upserts.
-    const battleResults = batchResults.slice(1, 1 + battleProjections.length);
+    // Statement 0 is the runs insert; statements 1..validBattleProjections.length are battle upserts.
+    const battleResults = batchResults.slice(1, 1 + validBattleProjections.length);
     battlesActuallyWritten = battleResults.reduce(
       (sum, r) => sum + (r.meta?.changes ?? 0),
       0,
@@ -422,13 +680,13 @@ export async function handleUploadRunBundle(
       if (racedExistingRun.payload_hash === payloadHash) {
         return json({
           status: "accepted",
-          run_id: inner.run_id,
+          run_id: runId,
           object_key: racedExistingRun.object_key,
         });
       }
 
       logWarn("run_bundles.upload", {
-        run_id: inner.run_id,
+        run_id: runId,
         existing_object_key: racedExistingRun.object_key,
         attempted_object_key: objectKey,
         outcome: "run_bundle_conflict_after_race",
@@ -439,13 +697,16 @@ export async function handleUploadRunBundle(
     throw projectResult.error;
   }
   logInfo("run_bundles.upload", {
-    run_id: inner.run_id,
+    run_id: runId,
     phase_ms: { parse: parseMs, r2_put: r2PutMs, d1_batch: d1BatchMs, total: Date.now() - phaseStart },
     battles_in_payload: battleProjections.length,
+    battles_skipped: skippedBattleProjections,
+    battle_run_id_mismatches_ignored: ignoredBattleRunIdMismatches,
+    timestamps_normalized: normalizedTimestampFields,
     // battles_projected = rows inserted or updated by the battle upserts.
     battles_projected: battlesActuallyWritten,
     outcome: "ok",
   });
 
-  return json({ status: "accepted", run_id: inner.run_id, object_key: objectKey });
+  return json({ status: "accepted", run_id: runId, object_key: objectKey });
 }

@@ -16,6 +16,50 @@ function buildUpload(body: unknown): Request {
   });
 }
 
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const bytes = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return bytes;
+}
+
+function buildDotNetStyleMultipartUpload(metadata: Record<string, unknown>): Request {
+  const encoder = new TextEncoder();
+  const boundary = "5933aec4-165b-4fdc-a827-69303c9b71cb";
+  const artifactBytes = new Uint8Array([31, 139, 8, 0, 1, 2, 3, 4]);
+  const body = concatBytes([
+    encoder.encode(
+      `--${boundary}\r\n`
+      + "Content-Type: application/json; charset=utf-8\r\n"
+      + 'Content-Disposition: form-data; name="metadata"\r\n'
+      + "\r\n"
+      + `${JSON.stringify(metadata)}\r\n`,
+    ),
+    encoder.encode(
+      `--${boundary}\r\n`
+      + "Content-Type: application/x-bpp-runbundle+msgpack+gzip\r\n"
+      + 'Content-Disposition: form-data; name="artifact"; filename="run-bundle.mpack.gz"\r\n'
+      + "\r\n",
+    ),
+    artifactBytes,
+    encoder.encode(`\r\n--${boundary}--\r\n`),
+  ]);
+
+  const request = new Request("https://example.com/run-bundles", {
+    method: "POST",
+    headers: {
+      "content-type": `multipart/form-data; boundary="${boundary}"`,
+      "content-length": String(body.byteLength),
+    },
+    body,
+  });
+  return request;
+}
+
 beforeEach(async () => {
   await resetTestState(env);
 });
@@ -88,19 +132,90 @@ test("POST /run-bundles writes runs row and stores R2 object on minimal valid pa
   });
 });
 
-test("POST /run-bundles rejects malformed timestamps", async () => {
+test("POST /run-bundles accepts quoted-boundary multipart through the byte parser", async () => {
+  const response = await worker.fetch(
+    buildDotNetStyleMultipartUpload(runBundleMetadata({ runId: "run-quoted-boundary" })),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ run_id: string; size_bytes: number }>(
+    env.DB,
+    "SELECT run_id, size_bytes FROM runs WHERE run_id = ?",
+    ["run-quoted-boundary"],
+  );
+  expect(row).toEqual({ run_id: "run-quoted-boundary", size_bytes: 8 });
+});
+
+test("POST /run-bundles normalizes malformed run timestamps instead of rejecting the bundle", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: {
         ...runBundleMetadata({ runId: "run-invalid-time" }),
         submitted_at_utc: "2026-05-26",
+        run_projection: {
+          run_id: "run-invalid-time",
+          status: "completed",
+          started_at_utc: "not-a-time",
+          ended_at_utc: "also-not-a-time",
+        },
       },
     }),
     env,
   );
 
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({ error: "invalid_run_bundle_request" });
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{
+    started_at_utc: string | null;
+    ended_at_utc: string;
+    submitted_at_utc: string;
+  }>(env.DB, "SELECT started_at_utc, ended_at_utc, submitted_at_utc FROM runs WHERE run_id = ?", [
+    "run-invalid-time",
+  ]);
+  expect(row?.started_at_utc).toBeNull();
+  expect(Date.parse(row!.ended_at_utc)).not.toBeNaN();
+  expect(Date.parse(row!.submitted_at_utc)).not.toBeNaN();
+});
+
+test("POST /run-bundles defaults missing status instead of rejecting the bundle", async () => {
+  const metadata = runBundleMetadata({ runId: "run-missing-status" });
+  metadata.run_projection = {
+    ...(metadata.run_projection as Record<string, unknown>),
+    status: "",
+  };
+
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({ metadata }),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ status: string }>(
+    env.DB,
+    "SELECT status FROM runs WHERE run_id = ?",
+    ["run-missing-status"],
+  );
+  expect(row).toEqual({ status: "completed" });
+});
+
+test("POST /run-bundles defaults missing metadata artifact codec", async () => {
+  const metadata = runBundleMetadata({ runId: "run-missing-codec" });
+  delete metadata.artifact_codec;
+
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({ metadata }),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ codec: string }>(
+    env.DB,
+    "SELECT codec FROM runs WHERE run_id = ?",
+    ["run-missing-codec"],
+  );
+  expect(row).toEqual({
+    codec: "application/x-bpp-runbundle+msgpack+gzip",
+  });
 });
 
 test("POST /run-bundles rejects legacy JSON artifact bodies", async () => {
@@ -156,18 +271,24 @@ test("POST /run-bundles rejects declared request bodies larger than the artifact
   expect(await response.json()).toEqual({ error: "payload_too_large" });
 });
 
-test("POST /run-bundles rejects dot-only object-key segments", async () => {
+test("POST /run-bundles accepts ids that are no longer used as object-key segments", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: {
-        ...runBundleMetadata({ uploader: "." }),
+        ...runBundleMetadata({ runId: "run:from:game", uploader: "." }),
       },
     }),
     env,
   );
 
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({ error: "invalid_run_bundle_request" });
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{
+    run_id: string;
+    player_account_id: string;
+  }>(env.DB, "SELECT run_id, player_account_id FROM runs WHERE run_id = ?", [
+    "run:from:game",
+  ]);
+  expect(row).toEqual({ run_id: "run:from:game", player_account_id: "." });
 });
 
 test("POST /run-bundles rejects too many battle projections", async () => {
@@ -189,7 +310,7 @@ test("POST /run-bundles rejects too many battle projections", async () => {
   expect(await response.json()).toEqual({ error: "too_many_battle_projections" });
 });
 
-test("POST /run-bundles rejects far-future battle timestamps", async () => {
+test("POST /run-bundles normalizes far-future battle timestamps", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: runBundleMetadata({
@@ -206,6 +327,11 @@ test("POST /run-bundles rejects far-future battle timestamps", async () => {
     env,
   );
 
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({ error: "invalid_run_bundle_request" });
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ recorded_at_utc: string }>(
+    env.DB,
+    "SELECT recorded_at_utc FROM battles WHERE battle_id = ?",
+    ["battle-future"],
+  );
+  expect(row?.recorded_at_utc).toBe("2026-05-26T00:00:00.000Z");
 });
