@@ -32,7 +32,7 @@ Upload a run artifact plus its D1 projections. R2 put happens before D1 batch; D
 ### Request body (multipart/form-data)
 
 | Part | Content-Type | Required | Body |
-|---|---|---|
+|---|---|---|---|
 | `metadata` | `application/json` or omitted by platform string part | yes | UTF-8 JSON with fields below |
 | `artifact` | `application/x-bpp-runbundle+msgpack+gzip` | yes | Raw gzip MessagePack artifact bytes; filename `run-bundle.mpack.gz` |
 
@@ -55,7 +55,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 
 | Field | Type |
 |---|---|
-| `run_id` | string (non-empty) | **required** |
+| `run_id` | string (non-empty; **required**) |
 | `status` | string; defaults to `completed` when invalid/missing |
 | `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing falls back to server receive time) |
 | `hero_id` | string |
@@ -135,7 +135,7 @@ Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
 - Bundle-final battle metadata is carried as `is_final_battle`; the old V3 `is_bundle_final_battle` name is not consumed or returned.
 - `seen_player_accounts` opponent filtering is active again. It keeps self-battles, keeps battles whose opponent has uploaded at least one run, and drops NULL or never-seen opponents at ingest.
-- R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
+- New V4/V5 upload object keys are opaque `run-bundles/<uuid>.mpack.gz` and contain no identity segment; rows ingested under earlier key schemes keep their original keys.
 - JSON `artifact_bytes` upload bodies removed in V5; artifact bytes are transmitted only as the multipart `artifact` part.
 
 ---
@@ -259,6 +259,8 @@ Upload one BazaarDB snapshot DTO. The body is stored mostly as opaque JSON bytes
 |---|---|---|
 | `:snapshot_id` | string | must match `^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$`; malformed percent-encoding or unsafe decoded id → 400 `invalid_snapshot_id` |
 
+The decoded path segment is trimmed before regex validation, and the body `snapshot.id` is trimmed before comparison, so whitespace-padded ids are accepted post-trim.
+
 ### Request body
 
 `Content-Type` must be `application/json`. The body is the full Snapshot DTO assembled by the mod, including metadata and base64 image payload. The mod preserves the full local PNG but sends an upload image derivative capped at 2 MiB; `image.content_type` can be `image/png` or `image/jpeg`. Max body size is 4 MiB. Empty bodies are rejected. The server minimally parses the JSON and requires `snapshot.id` to equal the `:snapshot_id` path parameter; the rest of the DTO is stored opaquely.
@@ -339,6 +341,8 @@ Claim the next BazaarDB delivery batch. At most one unexpired peek batch may be 
 
 `max_items` defaults to 10, is floored to an integer, and is clamped to the range 1–10 (non-finite or non-numeric values fall back to 10).
 
+The JSON body is parsed only when the `Content-Type` media type is `application/json` (parameters such as `charset` are allowed; matching is case-insensitive). Any other media type is treated as an empty body, so the defaults apply.
+
 ### Response 200 with items
 
 ```json
@@ -396,6 +400,8 @@ Confirm the subset of DTOs from a peek batch that BazaarDB successfully fetched 
   "snapshot_ids": ["snap-a", "snap-b"]
 }
 ```
+
+The JSON body is parsed only when the `Content-Type` media type is `application/json` (parameters such as `charset` are allowed; matching is case-insensitive). Any other media type is treated as an empty body, so the request fails with 400 `missing_peek_id`.
 
 ### Response 200
 
