@@ -63,18 +63,20 @@ export async function handleConfirmBazaarDbSnapshots(
     .bind(nowUtc, nowUtc, peekId, ...snapshotIds)
     .all<DeliveryRow>();
 
-  for (const row of rows.results) {
-    try {
-      await env.BAZAARDB_BUCKET.delete(row.r2_key);
-    } catch (error) {
-      logWarn("bazaardb.confirm", {
-        snapshot_id: row.snapshot_id,
-        r2_key: row.r2_key,
-        error: String(error),
-        outcome: "confirmed_r2_delete_error",
-      });
-    }
-  }
+  await Promise.all(
+    rows.results.map(async (row) => {
+      try {
+        await env.BAZAARDB_BUCKET.delete(row.r2_key);
+      } catch (error) {
+        logWarn("bazaardb.confirm", {
+          snapshot_id: row.snapshot_id,
+          r2_key: row.r2_key,
+          error: String(error),
+          outcome: "confirmed_r2_delete_error",
+        });
+      }
+    }),
+  );
 
   const confirmedSet = new Set(rows.results.map((row) => row.snapshot_id));
   const confirmed = snapshotIds.filter((id) => confirmedSet.has(id));

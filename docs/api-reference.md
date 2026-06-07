@@ -21,6 +21,8 @@
 
 No error variants.
 
+`/health` is a **liveness probe only**: it does not touch D1, R2, or secrets. A green `/health` does not imply `replay-link` or `peek` can presign URLs (e.g. when R2 secrets are missing those endpoints return 500 `internal_error` while `/health` stays 200).
+
 ---
 
 ## POST /run-bundles
@@ -46,7 +48,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 |---|---|---|
 | `schema_version` | number (finite; integer not enforced; defaults to current server schema when invalid/missing — current mod sends `5`) | no |
 | `player_account_id` | string (non-empty) | yes |
-| `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing falls back to server receive time) | no |
+| `submitted_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing or more than 10 minutes in the future falls back to server receive time) | no |
 | `artifact_codec` | string; defaults to the multipart artifact Content-Type when invalid/missing | no |
 | `run_projection` | object (see below) | no (defaults to `{}`) |
 | `battle_projections` | array of battle objects (see below; max 200 items) | no (defaults to `[]`) |
@@ -59,13 +61,13 @@ The metadata JSON must decode to an object; any other top-level JSON value (e.g.
 |---|---|
 | `run_id` | string (non-empty; **required**) |
 | `status` | string; defaults to `completed` when invalid/missing |
-| `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing falls back to server receive time) |
+| `ended_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid/missing or more than 10 minutes in the future falls back to server receive time) |
 | `hero_id` | string |
 | `hero_name` | string |
 | `player_rank` | string |
 | `player_rating` | number |
 | `player_position` | number |
-| `started_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) |
+| `started_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`; invalid or more than 10 minutes in the future is stored as null) |
 | `final_day` | number |
 | `final_wins` | number |
 | `final_losses` | number |
@@ -79,7 +81,7 @@ The metadata JSON must decode to an object; any other top-level JSON value (e.g.
 |---|---|---|
 | `battle_id` | string | missing/blank battle projections are skipped; the rest of the bundle is still accepted |
 | `run_id` | string | client-supplied value ignored; server always writes `run_projection.run_id` |
-| `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | invalid/missing/far-future values fall back to `submitted_at_utc` or server receive time |
+| `recorded_at_utc` | string (ISO-8601 with timezone; stored as UTC `toISOString()`) | invalid/missing/far-future values fall back to `submitted_at_utc` or server receive time; the fallback itself is upper-bound clamped, so a far-future `submitted_at_utc` cannot leak into `recorded_at_utc` |
 | `day` | number | |
 | `player_name` | string | |
 | `player_account_id` | string | client-supplied value ignored; server always writes the metadata-level `player_account_id` |
@@ -131,7 +133,9 @@ Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set
 | 413 | `payload_too_large` | Declared request body exceeds 8 MiB, or artifact part is empty or larger than 8 MiB |
 | 415 | `unsupported_content_type` | Request is not `multipart/form-data` |
 | 409 | `run_bundle_conflict` | The `run_id` already exists with a different artifact hash |
-| 500 | (rethrown) | R2 put failure or D1 batch failure after best-effort cleanup |
+| 500 | `internal_error` | R2 put failure or D1 batch failure after best-effort cleanup |
+
+The declared-size 413 applies only when the request carries a `Content-Length` header; without one, the size cap is enforced after the body is buffered (the empty/oversized artifact-part check is the hard limit, with Cloudflare platform body limits above that).
 
 ### V3 → V4/V5 deltas
 
@@ -198,6 +202,7 @@ Rows ordered by `recorded_at_utc DESC, battle_id DESC`.
 | Status | `error` code | Condition |
 |---|---|---|
 | 400 | `invalid_request` | `player_account_id` missing or blank |
+| 500 | `internal_error` | Unexpected failure (e.g. D1 unavailable) |
 
 ### V3 → V4 deltas
 
@@ -240,6 +245,7 @@ No request body.
 | 400 | `bad_request` | Malformed percent-encoding in `:battle_id` path segment |
 | 404 | `battle_not_found` | No battle (joined to its run) with that `battle_id` in D1 — either the battle row is missing or its `run_id` has no matching `runs` row |
 | 410 | `artifact_expired` | Battle row exists but `RUN_BUNDLE_BUCKET.head(object_key)` returned null (object deleted by R2 lifecycle) |
+| 500 | `internal_error` | Unexpected failure (e.g. R2 presign secrets missing, D1 unavailable) |
 
 ### V3 → V4 deltas
 
@@ -328,6 +334,9 @@ Idempotency takes precedence over validation: once a row exists for `snapshot_id
 | 400 | `snapshot_id_mismatch` | Body `snapshot.id` does not match the path `:snapshot_id` |
 | 413 | `payload_too_large` | Body is empty or exceeds 4 MiB |
 | 500 | `db_insert_failed` | R2 put succeeded but D1 insert failed for a non-idempotent reason |
+| 500 | `internal_error` | Other unexpected failure (e.g. R2 put failure) |
+
+The 413 for oversized bodies is pre-checked against `Content-Length` when the header is present; without one, the cap is enforced after the body is buffered (Cloudflare platform body limits apply above that).
 
 ---
 
@@ -380,13 +389,14 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 }
 ```
 
-Call `confirm` for successfully ingested DTOs or wait for the lease to expire. A pending row can be claimed at most 3 times; after that, the next `peek` marks it `failed` with `failure_reason='max_delivery_attempts'` and deletes its R2 object.
+Call `confirm` for successfully ingested DTOs or wait for the lease to expire. A pending row can be claimed at most 3 times; after that, the next `peek` marks it `failed` with `failure_reason='max_delivery_attempts'`. `failed` is a terminal accepted-loss state: the row is never re-queued or re-delivered, and its R2 object is not deleted immediately — cleanup of failed objects is owned by the bucket's R2 lifecycle rule. Re-uploading the same `snapshot_id` later still returns 200 without reviving the row, even if the lifecycle rule has already removed the object.
 
 ### Errors
 
 | Status | Body | Condition |
-|---|---|---|---|
+|---|---|---|
 | 401 | (empty) | Missing or incorrect bearer token |
+| 500 | `{ "error": "internal_error" }` | Unexpected failure (e.g. R2 presign secrets missing, D1 unavailable) |
 
 ---
 
@@ -426,12 +436,20 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 | 400 | `{ "error": "missing_peek_id" }` | `peek_id` is missing or blank |
 | 400 | `{ "error": "missing_snapshot_ids" }` | `snapshot_ids` is missing, not an array, or contains no non-empty ids |
 | 400 | `{ "error": "too_many_snapshot_ids" }` | More than 10 unique non-empty ids were supplied |
+| 500 | `{ "error": "internal_error" }` | Unexpected failure (e.g. D1 unavailable) |
 
 ---
+
+## Data retention
+
+- `runs` and `battles` D1 rows are retained indefinitely by design: the server has no `DELETE` path, TTL, or scheduled sweep for them.
+- Run-bundle R2 objects are governed by an R2 lifecycle rule configured in the Cloudflare dashboard (outside this repo). **Invariant: the run-bundle retention horizon must be ≥ 5 days**, the `GET /ghost-battles` lookback window — if retention drops below that, `replay-link` starts returning 410 `artifact_expired` for battles still inside the ghost window, with no other signal.
+- D1 rows whose R2 object has been lifecycle-deleted ("orphan rows") are expected and harmless; `replay-link` surfaces them as 410 `artifact_expired`.
+- `bazaardb_delivery` rows in `done`/`failed` are retained indefinitely as the idempotency ledger for snapshot re-uploads. `done` objects are deleted eagerly at confirm time; `failed` objects are left to the BazaarDB bucket's R2 lifecycle rule.
 
 ## BazaarDB clean-break notes
 
 - Deleted routes: `POST /bazaardb-screenshots` and `GET /bazaardb/manifest`.
 - The server no longer stores BazaarDB metadata columns; `bazaardb_delivery` is only a delivery queue/ledger.
-- Private R2 objects contain the full Snapshot DTO and are deleted after confirm.
+- Private R2 objects contain the full Snapshot DTO and are deleted after confirm; objects for `failed` rows are cleaned up by the bucket's R2 lifecycle rule instead.
 - Delivery is at-least-once within at most 3 peek claims; BazaarDB ingest must be idempotent by `snapshot_id`.

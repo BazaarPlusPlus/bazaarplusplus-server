@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { env } from "cloudflare:test";
 
 import { handleUploadBazaarDbSnapshot } from "../src/features/bazaardb/upload";
@@ -227,7 +227,11 @@ test("peek fails before claim or max-attempt cleanup when R2 presign secrets are
     R2_SECRET_ACCESS_KEY: "",
   };
 
-  await expect(worker.fetch(peekRequest(), badEnv)).rejects.toThrow("R2 SigV4 secrets missing");
+  // Unexpected failures surface as the canonical envelope with CORS headers.
+  const response = await worker.fetch(peekRequest(), badEnv);
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({ error: "internal_error" });
+  expect(response.headers.get("access-control-allow-origin")).toBe("*");
 
   const row = await selectFirst<{
     delivery_state: string;
@@ -358,7 +362,38 @@ test("expired leases can be reclaimed with a new peek id", async () => {
   expect(row?.delivery_attempts).toBe(2);
 });
 
-test("max-attempt pending rows are failed before claim and removed from R2", async () => {
+test("batch-failing at least three rows emits an error-level mass_delivery_failure event", async () => {
+  await seedDelivery("snap-burn-a", "2026-06-03T00:00:01.000Z", { attempts: 3 });
+  await seedDelivery("snap-burn-b", "2026-06-03T00:00:02.000Z", { attempts: 3 });
+  await seedDelivery("snap-burn-c", "2026-06-03T00:00:03.000Z", { attempts: 3 });
+
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const response = await peek();
+    expect(response.status).toBe(200);
+
+    const massFailureEvents = errorSpy.mock.calls
+      .map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+      .filter((entry) => entry.event === "bazaardb.peek");
+    expect(massFailureEvents).toEqual([
+      expect.objectContaining({
+        level: "error",
+        failed_count: 3,
+        outcome: "mass_delivery_failure",
+      }),
+    ]);
+  } finally {
+    errorSpy.mockRestore();
+  }
+
+  const failedCount = await selectFirst<{ n: number }>(
+    env.DB,
+    "SELECT COUNT(*) AS n FROM bazaardb_delivery WHERE delivery_state = 'failed'",
+  );
+  expect(failedCount?.n).toBe(3);
+});
+
+test("max-attempt pending rows fail terminally and leave their R2 objects for lifecycle cleanup", async () => {
   const failedKey = await seedDelivery("snap-poison", "2026-06-03T00:00:01.000Z", {
     attempts: 3,
   });
@@ -369,7 +404,7 @@ test("max-attempt pending rows are failed before claim and removed from R2", asy
   expect(response.status).toBe(200);
   const body = (await response.json()) as { items: Array<{ snapshot_id: string }> };
   expect(body.items.map((i) => i.snapshot_id)).toEqual(["snap-next"]);
-  expect(await env.BAZAARDB_BUCKET.head(failedKey)).toBeNull();
+  expect(await env.BAZAARDB_BUCKET.head(failedKey)).not.toBeNull();
 
   const failed = await selectFirst<{
     delivery_state: string;
@@ -384,4 +419,16 @@ test("max-attempt pending rows are failed before claim and removed from R2", asy
     failed_at_utc: expect.stringMatching(/Z$/),
     failure_reason: "max_delivery_attempts",
   });
+
+  // Re-uploading a failed snapshot id stays a no-op: 200, no revival to pending.
+  const reupload = await worker.fetch(
+    snapshotUpload("snap-poison", JSON.stringify({ snapshot: { id: "snap-poison" } })),
+    env,
+  );
+  expect(reupload.status).toBe(200);
+  const afterReupload = await selectFirst<{ delivery_state: string }>(
+    env.DB,
+    "SELECT delivery_state FROM bazaardb_delivery WHERE snapshot_id = 'snap-poison'",
+  );
+  expect(afterReupload).toEqual({ delivery_state: "failed" });
 });

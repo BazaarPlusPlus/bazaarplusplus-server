@@ -1,3 +1,5 @@
+import { logWarn } from "../observability";
+
 type R2PutValue = Parameters<R2Bucket["put"]>[1];
 type R2PutOptions = Parameters<R2Bucket["put"]>[2];
 
@@ -24,6 +26,33 @@ type ProjectSuccess<TProject> = {
 export type PutThenProjectResult<TProject, TCommitted> =
   | ProjectSuccess<TProject>
   | ProjectFailure<TCommitted>;
+
+/**
+ * Shared warn-level logging for a failed putThenProject result. `outcomeMap`
+ * is keyed by every CleanupOutcome so adding a variant is a compile error at
+ * each call site instead of a silently missing log. A map entry may be a
+ * function of the raced committed row for outcomes whose log string depends
+ * on it (e.g. run-bundles' raced-object `deleted` variant).
+ */
+export function logProjectFailure<TCommitted>(
+  event: string,
+  idFields: Record<string, unknown>,
+  failure: ProjectFailure<TCommitted>,
+  outcomeMap: Record<CleanupOutcome, string | ((committed: TCommitted | null) => string)>,
+): void {
+  const outcome = outcomeMap[failure.cleanup];
+  logWarn(event, {
+    ...idFields,
+    error: String(failure.error),
+    ...(failure.cleanup === "orphaned"
+      ? { cleanup_error: String(failure.cleanupError) }
+      : {}),
+    ...(failure.cleanup === "reference_lookup_failed"
+      ? { reference_lookup_error: String(failure.referenceLookupError) }
+      : {}),
+    outcome: typeof outcome === "function" ? outcome(failure.committed) : outcome,
+  });
+}
 
 export async function putThenProject<TProject, TCommitted>(options: {
   bucket: R2Bucket;

@@ -2,7 +2,7 @@ import type { Env } from "../../env";
 import { json, jsonError, requestMediaType } from "../../http/json";
 import { declaredContentLengthExceeds, objectKeySegment } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
-import { putThenProject } from "../../storage/putThenProject";
+import { logProjectFailure, putThenProject } from "../../storage/putThenProject";
 
 const MaxSnapshotBodyBytes = 4 * 1024 * 1024;
 
@@ -117,42 +117,17 @@ export async function handleUploadBazaarDbSnapshot(
   });
 
   if (!projectResult.ok) {
-    switch (projectResult.cleanup) {
-      case "kept":
-        logWarn("bazaardb.snapshot_upload", {
-          snapshot_id: normalizedSnapshotId,
-          r2_key: r2Key,
-          error: String(projectResult.error),
-          outcome: "d1_insert_failed_existing_object_kept",
-        });
-        break;
-      case "deleted":
-        logWarn("bazaardb.snapshot_upload", {
-          snapshot_id: normalizedSnapshotId,
-          r2_key: r2Key,
-          error: String(projectResult.error),
-          outcome: "d1_insert_failed_r2_cleaned",
-        });
-        break;
-      case "orphaned":
-        logWarn("bazaardb.snapshot_upload", {
-          snapshot_id: normalizedSnapshotId,
-          r2_key: r2Key,
-          error: String(projectResult.error),
-          cleanup_error: String(projectResult.cleanupError),
-          outcome: "d1_insert_failed_r2_orphaned",
-        });
-        break;
-      case "reference_lookup_failed":
-        logWarn("bazaardb.snapshot_upload", {
-          snapshot_id: normalizedSnapshotId,
-          r2_key: r2Key,
-          error: String(projectResult.error),
-          reference_lookup_error: String(projectResult.referenceLookupError),
-          outcome: "d1_insert_failed_reference_lookup_failed",
-        });
-        break;
-    }
+    logProjectFailure(
+      "bazaardb.snapshot_upload",
+      { snapshot_id: normalizedSnapshotId, r2_key: r2Key },
+      projectResult,
+      {
+        kept: "d1_insert_failed_existing_object_kept",
+        deleted: "d1_insert_failed_r2_cleaned",
+        orphaned: "d1_insert_failed_r2_orphaned",
+        reference_lookup_failed: "d1_insert_failed_reference_lookup_failed",
+      },
+    );
 
     const racedExisting = projectResult.committed;
     if (racedExisting) {

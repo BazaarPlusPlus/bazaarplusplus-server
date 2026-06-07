@@ -11,7 +11,7 @@ import {
   optionalTrimmedString,
 } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
-import { putThenProject } from "../../storage/putThenProject";
+import { logProjectFailure, putThenProject } from "../../storage/putThenProject";
 import type { RunBundleParts } from "./multipart";
 import { isMultipart, parseMultipartBoundary, parseMultipartBytes } from "./multipart";
 
@@ -59,7 +59,7 @@ type ExistingRunRow = {
 const RunBundleArtifactContentType = "application/x-bpp-runbundle+msgpack+gzip";
 const MaxRunBundleArtifactBytes = 8 * 1024 * 1024;
 const MaxBattleProjections = 200;
-const MaxBattleRecordedAtFutureSkewMs = 10 * 60 * 1000;
+const MaxTimestampFutureSkewMs = 10 * 60 * 1000;
 const DefaultRunBundleSchemaVersion = 5;
 
 const RUNS_INSERT_SQL = `
@@ -133,7 +133,7 @@ async function findExistingRun(env: Env, runId: string): Promise<ExistingRunRow 
 }
 
 function isAfterAllowedFutureSkew(isoDateTimeUtc: string, nowMs: number): boolean {
-  return Date.parse(isoDateTimeUtc) > nowMs + MaxBattleRecordedAtFutureSkewMs;
+  return Date.parse(isoDateTimeUtc) > nowMs + MaxTimestampFutureSkewMs;
 }
 
 function rejectInvalidRunBundle(reason: string, fields: Record<string, unknown> = {}): Response {
@@ -154,14 +154,18 @@ function schemaVersion(value: unknown): number {
 function normalizeTimestampOrFallback(
   value: unknown,
   fallbackUtc: string,
+  validationNowMs: number,
 ): { value: string; normalized: boolean } {
   const normalized = normalizeIsoDateTime(value);
-  return normalized == null
+  return normalized == null || isAfterAllowedFutureSkew(normalized, validationNowMs)
     ? { value: fallbackUtc, normalized: true }
     : { value: normalized, normalized: false };
 }
 
-function normalizeOptionalTimestamp(value: unknown): {
+function normalizeOptionalTimestamp(
+  value: unknown,
+  validationNowMs: number,
+): {
   value: string | null;
   normalized: boolean;
 } {
@@ -170,7 +174,7 @@ function normalizeOptionalTimestamp(value: unknown): {
   }
 
   const normalized = optionalIsoDateTime(value);
-  return normalized == null
+  return normalized == null || isAfterAllowedFutureSkew(normalized, validationNowMs)
     ? { value: null, normalized: true }
     : { value: normalized, normalized: false };
 }
@@ -338,9 +342,17 @@ export async function handleUploadRunBundle(
   const artifactCodec = optionalTrimmedString(rawBody.artifact_codec)
     ?? RunBundleArtifactContentType;
 
-  const submittedAt = normalizeTimestampOrFallback(rawBody.submitted_at_utc, nowUtc);
-  const endedAt = normalizeTimestampOrFallback(runProjectionRaw.ended_at_utc, nowUtc);
-  const startedAt = normalizeOptionalTimestamp(runProjectionRaw.started_at_utc);
+  const submittedAt = normalizeTimestampOrFallback(
+    rawBody.submitted_at_utc,
+    nowUtc,
+    validationNowMs,
+  );
+  const endedAt = normalizeTimestampOrFallback(
+    runProjectionRaw.ended_at_utc,
+    nowUtc,
+    validationNowMs,
+  );
+  const startedAt = normalizeOptionalTimestamp(runProjectionRaw.started_at_utc, validationNowMs);
 
   const battleProjections: BattleProjection[] = Array.isArray(rawBody.battle_projections)
     ? (rawBody.battle_projections as BattleProjection[])
@@ -509,45 +521,20 @@ export async function handleUploadRunBundle(
   });
 
   if (!projectResult.ok) {
-    switch (projectResult.cleanup) {
-      case "kept":
-        logWarn("run_bundles.upload", {
-          run_id: runId,
-          object_key: objectKey,
-          error: String(projectResult.error),
-          outcome: "d1_batch_failed_existing_object_kept",
-        });
-        break;
-      case "deleted":
-        logWarn("run_bundles.upload", {
-          run_id: runId,
-          object_key: objectKey,
-          error: String(projectResult.error),
-          outcome:
-            projectResult.committed == null
-              ? "d1_batch_failed_r2_cleaned"
-              : "d1_batch_failed_raced_object_cleaned",
-        });
-        break;
-      case "orphaned":
-        logWarn("run_bundles.upload", {
-          run_id: runId,
-          object_key: objectKey,
-          error: String(projectResult.error),
-          cleanup_error: String(projectResult.cleanupError),
-          outcome: "d1_batch_failed_r2_orphaned",
-        });
-        break;
-      case "reference_lookup_failed":
-        logWarn("run_bundles.upload", {
-          run_id: runId,
-          object_key: objectKey,
-          error: String(projectResult.error),
-          reference_lookup_error: String(projectResult.referenceLookupError),
-          outcome: "d1_batch_failed_reference_lookup_failed",
-        });
-        break;
-    }
+    logProjectFailure(
+      "run_bundles.upload",
+      { run_id: runId, object_key: objectKey },
+      projectResult,
+      {
+        kept: "d1_batch_failed_existing_object_kept",
+        deleted: (committed) =>
+          committed == null
+            ? "d1_batch_failed_r2_cleaned"
+            : "d1_batch_failed_raced_object_cleaned",
+        orphaned: "d1_batch_failed_r2_orphaned",
+        reference_lookup_failed: "d1_batch_failed_reference_lookup_failed",
+      },
+    );
   }
 
   if (projectResult.ok) {

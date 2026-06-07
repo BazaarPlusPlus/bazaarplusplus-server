@@ -96,7 +96,9 @@ export default {
         error: String(error),
         outcome: "unhandled_error",
       });
-      throw error;
+      // Unexpected failures still answer with the canonical error envelope and
+      // CORS headers instead of a bare platform 500. The error is logged above.
+      return withCors(request, jsonError("internal_error", 500));
     }
   },
 };

@@ -2,18 +2,25 @@ import { createR2Presigner } from "../../crypto/presign";
 import type { Env } from "../../env";
 import { requireBearer } from "../../http/auth";
 import { json, readOptionalJsonObject } from "../../http/json";
-import { logInfo, logWarn } from "../../observability";
+import { logError, logInfo, logWarn } from "../../observability";
 
 import {
   type ClaimedDeliveryRow,
   createPeekId,
-  type DeliveryRow,
   LeaseSeconds,
   MaxDeliveryAttempts,
   type OutstandingLeaseRow,
   requestedPeekLimit,
 } from "./delivery";
 
+// Batch alarm threshold, independent of the per-row retry cap MaxDeliveryAttempts.
+// A single poison snapshot fails alone; reaching this many failures in one sweep
+// signals the whole queue is burning (e.g. R2 token mismatch on the partner side).
+const MassDeliveryFailureThreshold = 3;
+
+// `failed` is a terminal accepted-loss state: rows are never re-queued and the
+// server does not delete their R2 objects here — cleanup of failed objects is
+// owned by the bucket's R2 lifecycle rule. Only confirm deletes objects eagerly.
 async function failMaxAttemptRows(env: Env, nowUtc: string): Promise<void> {
   const failed = await env.DB.prepare(
     `
@@ -27,33 +34,23 @@ async function failMaxAttemptRows(env: Env, nowUtc: string): Promise<void> {
       WHERE delivery_state = 'pending'
         AND (lease_until_utc IS NULL OR lease_until_utc < ?)
         AND delivery_attempts >= ?
-      RETURNING snapshot_id, r2_key
+      RETURNING snapshot_id
     `,
   )
     .bind(nowUtc, nowUtc, nowUtc, MaxDeliveryAttempts)
-    .all<DeliveryRow>();
+    .all<{ snapshot_id: string }>();
 
-  if (failed.results.length > 0) {
+  if (failed.results.length >= MassDeliveryFailureThreshold) {
+    logError("bazaardb.peek", {
+      failed_count: failed.results.length,
+      outcome: "mass_delivery_failure",
+    });
+  } else if (failed.results.length > 0) {
     logWarn("bazaardb.peek", {
       failed_count: failed.results.length,
       outcome: "max_delivery_attempts_failed",
     });
   }
-
-  await Promise.all(
-    failed.results.map(async (row) => {
-      try {
-        await env.BAZAARDB_BUCKET.delete(row.r2_key);
-      } catch (error) {
-        logWarn("bazaardb.peek", {
-          snapshot_id: row.snapshot_id,
-          r2_key: row.r2_key,
-          error: String(error),
-          outcome: "failed_r2_delete_error",
-        });
-      }
-    }),
-  );
 }
 
 async function findOutstandingLease(

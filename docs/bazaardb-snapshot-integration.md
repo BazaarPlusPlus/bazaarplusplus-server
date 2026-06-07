@@ -1,6 +1,6 @@
 # BazaarPlusPlus x BazaarDB Snapshot Integration
 
-Last updated: 2026-06-04
+Last updated: 2026-06-07
 
 The new version of BazaarPlusPlus is currently in **preview** and may still have some rough edges. We plan to roll it out to all users over the **weekend of June 6–7, 2026**. Between now and the full rollout, the API and DTO schema may undergo minor changes; we will notify you in advance of any breaking changes.
 
@@ -113,7 +113,11 @@ If a previous batch is still leased and not yet confirmed, the server returns `4
 }
 ```
 
-To resolve a 409, either confirm (or partially confirm) the outstanding peek, or wait for its lease to expire. Once the lease expires, unconfirmed snapshots return to the pending queue while they are still under the delivery-attempt cap. Each snapshot can be claimed at most 3 times; after that, the next `peek` marks it failed and deletes the stored object.
+To resolve a 409, either confirm (or partially confirm) the outstanding peek, or wait for its lease to expire. Once the lease expires, unconfirmed snapshots return to the pending queue while they are still under the delivery-attempt cap. Each snapshot can be claimed at most 3 times; after that, the next `peek` marks it failed.
+
+**The attempt counter is consumed at `peek` time, not at download time.** Every `peek` that hands you a snapshot spends one of its 3 attempts immediately, regardless of whether your download or persistence then succeeds. You must `POST /confirm` that `snapshot_id` within the 600-second lease window; if you do not (download failed, persistence failed, your job crashed, or `confirm` simply ran later than the lease), the lease expires and the next `peek` re-claims it and spends the next attempt. Three claims without a successful `confirm` — for any reason, not only download 403s — exhaust the snapshot and mark it failed. Practical SLA: treat 600 seconds from `peek` as the hard deadline to `confirm`, and keep your peek→download→persist→confirm cycle well inside it.
+
+Failed is a terminal state: the snapshot is never re-queued or re-delivered, and that data is accepted as lost from the queue's perspective. The stored object is not deleted immediately — it is cleaned up later by a storage lifecycle rule — but there is no API to retrieve or revive a failed snapshot, and re-uploading the same `snapshot_id` will not revive it (even after the lifecycle rule has removed the object). If your pull job repeatedly exhausts snapshots (downloads failing, or confirms not landing inside the lease), contact us before the queue burns through — the server raises an internal alarm on mass failures, but recovery on our side is not automatic.
 
 ### Confirm
 
@@ -252,6 +256,10 @@ Example:
 This version no longer uses the old PAT approach.
 
 Players simply enable the BazaarDB upload toggle inside the BazaarPlusPlus mod. BazaarDB can use `player.display_name` (the in-game player name) from the Snapshot DTO to bind records to users on your side.
+
+### Trust caveat
+
+The snapshot upload endpoint (`POST /bazaardb/snapshots/:snapshot_id`) is currently **unauthenticated** on the BazaarPlusPlus side: anyone who can reach the API can submit a snapshot with an arbitrary `player.display_name` (and other DTO fields). Treat `display_name` as client-supplied, spoofable input — apply your own plausibility/abuse checks before binding records to users. Upload authentication is on our roadmap; we will notify you before any change that affects the pull API.
 
 ## Product Direction
 

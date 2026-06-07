@@ -355,6 +355,84 @@ test("POST /run-bundles skips null battle projection elements and writes the val
   expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
+test("POST /run-bundles clamps far-future run timestamps to server receive time", async () => {
+  const beforeMs = Date.now();
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: {
+        ...runBundleMetadata({ runId: "run-future-run" }),
+        submitted_at_utc: "2999-01-01T00:00:00.000Z",
+        run_projection: {
+          run_id: "run-future-run",
+          status: "completed",
+          started_at_utc: "2999-01-01T00:00:00.000Z",
+          ended_at_utc: "2999-01-01T01:00:00.000Z",
+        },
+      },
+    }),
+    env,
+  );
+  const afterMs = Date.now();
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{
+    started_at_utc: string | null;
+    ended_at_utc: string;
+    submitted_at_utc: string;
+  }>(env.DB, "SELECT started_at_utc, ended_at_utc, submitted_at_utc FROM runs WHERE run_id = ?", [
+    "run-future-run",
+  ]);
+  expect(row?.started_at_utc).toBeNull();
+  expect(Date.parse(row!.submitted_at_utc)).toBeGreaterThanOrEqual(beforeMs);
+  expect(Date.parse(row!.submitted_at_utc)).toBeLessThanOrEqual(afterMs);
+  expect(Date.parse(row!.ended_at_utc)).toBeGreaterThanOrEqual(beforeMs);
+  expect(Date.parse(row!.ended_at_utc)).toBeLessThanOrEqual(afterMs);
+});
+
+test("far-future submitted_at_utc cannot poison the battle recorded_at fallback", async () => {
+  const beforeMs = Date.now();
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: {
+        ...runBundleMetadata({
+          runId: "run-future-fallback",
+          battles: [
+            {
+              battle_id: "battle-missing-recorded-at",
+              run_id: "run-future-fallback",
+              opponent_account_id: "player-001",
+            },
+            {
+              battle_id: "battle-future-recorded-at",
+              run_id: "run-future-fallback",
+              recorded_at_utc: "2999-01-01T00:00:00.000Z",
+              opponent_account_id: "player-001",
+            },
+          ],
+        }),
+        submitted_at_utc: "2999-01-01T00:00:00.000Z",
+      },
+    }),
+    env,
+  );
+  const afterMs = Date.now();
+
+  expect(response.status).toBe(200);
+  const rows = await env.DB.prepare(
+    "SELECT battle_id, recorded_at_utc FROM battles WHERE run_id = ? ORDER BY battle_id",
+  )
+    .bind("run-future-fallback")
+    .all<{ battle_id: string; recorded_at_utc: string }>();
+  expect(rows.results.map((row) => row.battle_id)).toEqual([
+    "battle-future-recorded-at",
+    "battle-missing-recorded-at",
+  ]);
+  for (const row of rows.results) {
+    expect(Date.parse(row.recorded_at_utc)).toBeGreaterThanOrEqual(beforeMs);
+    expect(Date.parse(row.recorded_at_utc)).toBeLessThanOrEqual(afterMs);
+  }
+});
+
 test("POST /run-bundles normalizes far-future battle timestamps", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
