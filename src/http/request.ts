@@ -108,3 +108,13 @@ export function parseClampedInteger(
 
   return Math.min(max, Math.max(min, parsed));
 }
+
+const ObjectKeySegmentPattern = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Sanitize a single object-key path segment. Returns null on invalid input
+ * (caller decides whether that's a 400 or an internal error).
+ */
+export function objectKeySegment(value: string): string | null {
+  return ObjectKeySegmentPattern.test(value) ? value : null;
+}

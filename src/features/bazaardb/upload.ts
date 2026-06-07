@@ -1,6 +1,6 @@
 import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
-import { objectKeySegment } from "../../http/validation";
+import { objectKeySegment } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
 import { putThenProject } from "../../storage/putThenProject";
 
