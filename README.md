@@ -80,7 +80,9 @@ migrations/
 └── 0004_drop_unused_bazaardb_pending_order_index.sql
 docs/
 ├── api-reference.md         # Wire contract (single source of truth)
-└── bazaardb-snapshot-integration.md   # Partner-facing integration guide
+├── bazaardb-snapshot-integration.md   # Partner-facing integration guide
+├── architecture-decisions.md          # Standing design decisions and rationale
+└── known-issues.md                    # Analyzed but unresolved items
 ```
 
 ## API Endpoints
