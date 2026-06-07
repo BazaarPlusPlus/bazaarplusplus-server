@@ -109,6 +109,11 @@ export function parseClampedInteger(
   return Math.min(max, Math.max(min, parsed));
 }
 
+export function declaredContentLengthExceeds(request: Request, maxBytes: number): boolean {
+  const declaredLength = Number.parseInt(request.headers.get("content-length") ?? "", 10);
+  return Number.isFinite(declaredLength) && declaredLength > maxBytes;
+}
+
 const ObjectKeySegmentPattern = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$/;
 
 /**

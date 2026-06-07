@@ -20,14 +20,17 @@ export function jsonError(errorCode: string, status = 400): Response {
   return json({ error: errorCode }, { status });
 }
 
+export function requestMediaType(request: Request): string | undefined {
+  return request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+}
+
 export async function readOptionalJsonObject(request: Request): Promise<Record<string, unknown>> {
   const body = await request.text();
   if (body.trim().length === 0) {
     return {};
   }
 
-  const mediaType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  if (mediaType !== "application/json") {
+  if (requestMediaType(request) !== "application/json") {
     return {};
   }
 

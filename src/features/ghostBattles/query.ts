@@ -1,8 +1,9 @@
-import { GHOST_QUERY_LOOKBACK_DAYS } from "../../config";
 import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
 import { parseClampedInteger, trimString } from "../../http/request";
 import { logInfo } from "../../observability";
+
+const GHOST_QUERY_LOOKBACK_DAYS = 5;
 
 type GhostBattleRow = {
   battle_id: string;

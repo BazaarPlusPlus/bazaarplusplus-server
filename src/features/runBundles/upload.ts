@@ -4,6 +4,7 @@ import { sha256Base64 } from "../../crypto/hash";
 import type { Env } from "../../env";
 import { json, jsonError } from "../../http/json";
 import {
+  declaredContentLengthExceeds,
   normalizeIsoDateTime,
   optionalFiniteNumber,
   optionalIsoDateTime,
@@ -294,8 +295,7 @@ async function readMultipartRunBundle(request: Request): Promise<{
     throw jsonError("unsupported_content_type", 415);
   }
 
-  const declaredLength = Number.parseInt(request.headers.get("content-length") ?? "", 10);
-  if (Number.isFinite(declaredLength) && declaredLength > MaxRunBundleArtifactBytes) {
+  if (declaredContentLengthExceeds(request, MaxRunBundleArtifactBytes)) {
     throw jsonError("payload_too_large", 413);
   }
 

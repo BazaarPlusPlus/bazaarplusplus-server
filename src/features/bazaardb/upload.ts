@@ -1,15 +1,10 @@
 import type { Env } from "../../env";
-import { json, jsonError } from "../../http/json";
-import { objectKeySegment } from "../../http/request";
+import { json, jsonError, requestMediaType } from "../../http/json";
+import { declaredContentLengthExceeds, objectKeySegment } from "../../http/request";
 import { logInfo, logWarn } from "../../observability";
 import { putThenProject } from "../../storage/putThenProject";
 
 const MaxSnapshotBodyBytes = 4 * 1024 * 1024;
-
-function isApplicationJson(request: Request): boolean {
-  const mediaType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  return mediaType === "application/json";
-}
 
 async function snapshotExists(
   env: Env,
@@ -67,12 +62,11 @@ export async function handleUploadBazaarDbSnapshot(
     return ok(normalizedSnapshotId, existing.uploaded_at_utc);
   }
 
-  if (!isApplicationJson(request)) {
+  if (requestMediaType(request) !== "application/json") {
     return jsonError("unsupported_content_type");
   }
 
-  const declaredLength = Number.parseInt(request.headers.get("content-length") ?? "", 10);
-  if (Number.isFinite(declaredLength) && declaredLength > MaxSnapshotBodyBytes) {
+  if (declaredContentLengthExceeds(request, MaxSnapshotBodyBytes)) {
     return jsonError("payload_too_large", 413);
   }
 
