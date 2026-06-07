@@ -77,6 +77,8 @@ const RUNS_INSERT_SQL = `
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
+// ?6 is the metadata-level uploader and ?14 is the battle opponent. The literal
+// self-battle branch avoids relying on same-batch reads from seen_player_accounts.
 const BATTLE_INSERT_SQL = `
   INSERT INTO battles (
     battle_id, run_id, recorded_at_utc, day,
@@ -85,7 +87,16 @@ const BATTLE_INSERT_SQL = `
     opponent_name, opponent_account_id, opponent_hero, opponent_rank, opponent_rating, opponent_level,
     opponent_prestige, opponent_victories,
     result, winner_combatant_id, loser_combatant_id, is_final_battle, updated_at_utc
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  )
+  SELECT
+    ?1, ?2, ?3, ?4,
+    ?5, ?6, ?7, ?8, ?9, ?10,
+    ?11, ?12,
+    ?13, ?14, ?15, ?16, ?17, ?18,
+    ?19, ?20,
+    ?21, ?22, ?23, ?24, ?25
+  WHERE ?14 = ?6
+     OR ?14 IN (SELECT player_account_id FROM seen_player_accounts)
   ON CONFLICT(battle_id) DO UPDATE SET
     run_id = excluded.run_id,
     recorded_at_utc = excluded.recorded_at_utc,
@@ -600,6 +611,12 @@ export async function handleUploadRunBundle(
       ),
     );
   }
+
+  statements.push(
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO seen_player_accounts (player_account_id, first_seen_at_utc) VALUES (?, ?)",
+    ).bind(playerAccountId, nowUtc),
+  );
 
   let d1BatchMs = 0;
   let battlesActuallyWritten = 0;

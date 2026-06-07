@@ -6,7 +6,7 @@
 - `runBundles/upload.ts` treats `runs.run_id` as immutable: same `run_id` + same artifact hash is idempotent; same `run_id` + different artifact hash returns 409 `run_bundle_conflict`.
 - Battle INSERTs in `runBundles/upload.ts` must keep `ON CONFLICT(battle_id) DO UPDATE` so duplicate battle projections within a valid new run do not rollback the D1 batch.
 - `battles.is_final_battle` is part of the current V4 mod-facing wire contract: `BATTLE_INSERT_SQL` writes it with sticky `MAX()` semantics, `GET /ghost-battles` returns it as a boolean, and `test/ghostBattles.query.test.ts` asserts both presence and sticky behavior. Do not change, remove, or rename it without updating `docs/api-reference.md`, server tests, and mod client tests together.
-- Battle projection is full-ingest: every valid `battle_projections[]` item should be upserted into `battles` regardless of opponent account. Do not reintroduce opponent allow-list filtering without updating the API doc, schema, and tests together.
+- Battle projection is filtered at ingest: a valid `battle_projections[]` item is upserted into `battles` only when `opponent_account_id` equals the metadata-level uploader or already exists in `seen_player_accounts`; NULL opponents are dropped. `seen_player_accounts` only records uploaders, its upsert must remain the final D1 batch statement, and self-battles must keep the literal `?14 = ?6` SQL branch rather than relying on same-batch read-after-write visibility.
 - R2 puts set only `httpMetadata.contentType`; `customMetadata` is intentionally **not written**. V3 wrote `retention_days` there, but no code ever read it. R2 lifecycle lives in the CF dashboard.
 
 # Pull Request Hygiene

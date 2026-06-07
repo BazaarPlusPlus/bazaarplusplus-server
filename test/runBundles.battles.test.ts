@@ -7,6 +7,7 @@ import { handleUploadRunBundle } from "../src/features/runBundles/upload";
 import worker from "../src/index";
 import {
   countRows,
+  insertSeenPlayerAccount,
   resetTestState,
   selectFirst,
 } from "./helpers/seed";
@@ -54,11 +55,18 @@ function metadata(opts: {
   });
 }
 
+async function seedSeenPlayerAccount(playerAccountId: string): Promise<void> {
+  await insertSeenPlayerAccount(env.DB, {
+    playerAccountId,
+    firstSeenAtUtc: "2026-05-25T00:00:00.000Z",
+  });
+}
+
 beforeEach(async () => {
   await resetTestState(env);
 });
 
-test("battles are projected even when the opponent was not seen before", async () => {
+test("battles are dropped when the opponent was not seen before", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -70,10 +78,18 @@ test("battles are projected even when the opponent was not seen before", async (
     env,
   );
   expect(response.status).toBe(200);
-  expect(await countRows(env.DB, "battles")).toBe(1);
+  expect(await countRows(env.DB, "runs")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(0);
+  expect(await selectFirst<{ player_account_id: string }>(
+    env.DB,
+    "SELECT player_account_id FROM seen_player_accounts WHERE player_account_id = ?",
+    ["uploader-1"],
+  )).toEqual({ player_account_id: "uploader-1" });
 });
 
 test("battles are projected with opponent account metadata", async () => {
+  await seedSeenPlayerAccount("known-opponent");
+
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -107,6 +123,8 @@ test("battle projections without a battle id are skipped while the run is still 
 });
 
 test("battle projection run id mismatches are ignored in favor of the run projection id", async () => {
+  await seedSeenPlayerAccount("known-opponent");
+
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: runBundleMetadata({
@@ -134,6 +152,8 @@ test("battle projection run id mismatches are ignored in favor of the run projec
 });
 
 test("battles project participant prestige, victories, and winner/loser ids", async () => {
+  await seedSeenPlayerAccount("known-opponent");
+
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -198,10 +218,12 @@ test("self-battle: opponent == uploader → projected", async () => {
     env,
   );
   expect(response.status).toBe(200);
+  // This is protected by BATTLE_INSERT_SQL's literal opponent == uploader branch,
+  // not by reading the uploader's just-appended seen_player_accounts row in the same batch.
   expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
-test("battles with NULL opponent_account_id are projected", async () => {
+test("battles with NULL opponent_account_id are dropped", async () => {
   const response = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -213,10 +235,12 @@ test("battles with NULL opponent_account_id are projected", async () => {
     env,
   );
   expect(response.status).toBe(200);
-  expect(await countRows(env.DB, "battles")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(0);
 });
 
 test("re-upload with the same run artifact is idempotent", async () => {
+  await seedSeenPlayerAccount("opp-1");
+
   const first = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -246,6 +270,8 @@ test("re-upload with the same run artifact is idempotent", async () => {
 });
 
 test("idempotent re-upload does not refresh battle projections", async () => {
+  await seedSeenPlayerAccount("opp-1");
+
   const first = await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -278,6 +304,113 @@ test("idempotent re-upload does not refresh battle projections", async () => {
     ["run-idempotent-projection"],
   );
   expect(row).toEqual({ battle_id: "b-original", opponent_account_id: "opp-1" });
+});
+
+test("seen status is eventually used for later battles against the same player", async () => {
+  const beforeSeen = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-before-seen",
+        uploader: "uploader-A",
+        battles: [{ battle_id: "b-before-seen", opponent_account_id: "player-X" }],
+      }),
+    }),
+    env,
+  );
+  expect(beforeSeen.status).toBe(200);
+  expect(await countRows(env.DB, "battles")).toBe(0);
+
+  const targetUpload = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-player-X",
+        uploader: "player-X",
+        battles: [],
+      }),
+    }),
+    env,
+  );
+  expect(targetUpload.status).toBe(200);
+
+  const afterSeen = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-after-seen",
+        uploader: "uploader-A",
+        battles: [{ battle_id: "b-after-seen", opponent_account_id: "player-X" }],
+      }),
+    }),
+    env,
+  );
+  expect(afterSeen.status).toBe(200);
+
+  expect(await countRows(env.DB, "battles")).toBe(1);
+  expect(await selectFirst<{ battle_id: string; opponent_account_id: string | null }>(
+    env.DB,
+    "SELECT battle_id, opponent_account_id FROM battles",
+  )).toEqual({ battle_id: "b-after-seen", opponent_account_id: "player-X" });
+});
+
+test("mixed battle batches only project self and seen opponents", async () => {
+  await seedSeenPlayerAccount("seen-opponent");
+
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-mixed-battles",
+        uploader: "uploader-1",
+        battles: [
+          { battle_id: "b-seen", opponent_account_id: "seen-opponent" },
+          { battle_id: "b-self", opponent_account_id: "uploader-1" },
+          { battle_id: "b-stranger", opponent_account_id: "stranger" },
+          { battle_id: "b-null", opponent_account_id: null },
+        ],
+      }),
+    }),
+    env,
+  );
+  expect(response.status).toBe(200);
+
+  const rows = await env.DB.prepare(
+    "SELECT battle_id FROM battles ORDER BY battle_id",
+  ).all<{ battle_id: string }>();
+  expect(rows.results.map((row) => row.battle_id)).toEqual(["b-seen", "b-self"]);
+});
+
+test("duplicate battle ids in one upload do not roll back the D1 batch", async () => {
+  await seedSeenPlayerAccount("known-opponent");
+
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({
+      metadata: metadata({
+        runId: "run-duplicate-battles",
+        uploader: "uploader-1",
+        battles: [
+          {
+            battle_id: "b-duplicate",
+            opponent_account_id: "known-opponent",
+            opponent_victories: 10,
+          },
+          {
+            battle_id: "b-duplicate",
+            opponent_account_id: "known-opponent",
+            opponent_victories: 11,
+          },
+        ],
+      }),
+    }),
+    env,
+  );
+  expect(response.status).toBe(200);
+  expect(await countRows(env.DB, "runs")).toBe(1);
+  expect(await countRows(env.DB, "battles")).toBe(1);
+
+  const row = await selectFirst<{ opponent_victories: number | null }>(
+    env.DB,
+    "SELECT opponent_victories FROM battles WHERE battle_id = ?",
+    ["b-duplicate"],
+  );
+  expect(row).toEqual({ opponent_victories: 11 });
 });
 
 test("different runs with identical artifact bytes get distinct object keys", async () => {
@@ -337,7 +470,7 @@ test("re-upload with the same run id but different artifact is rejected", async 
   expect(await second.json()).toEqual({ error: "run_bundle_conflict" });
 });
 
-test("uploading a run without battles only writes the run projection", async () => {
+test("uploading a run without battles writes the run projection and marks uploader seen", async () => {
   await worker.fetch(
     buildRunBundleMultipartUpload({
       metadata: metadata({
@@ -356,6 +489,11 @@ test("uploading a run without battles only writes the run projection", async () 
     ["run-G"],
   );
   expect(row?.player_account_id).toBe("uploader-2");
+  expect(await selectFirst<{ player_account_id: string }>(
+    env.DB,
+    "SELECT player_account_id FROM seen_player_accounts WHERE player_account_id = ?",
+    ["uploader-2"],
+  )).toEqual({ player_account_id: "uploader-2" });
 });
 
 test("raced idempotent upload deletes only its own uncommitted object", async () => {

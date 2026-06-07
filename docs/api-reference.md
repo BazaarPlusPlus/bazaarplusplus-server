@@ -88,7 +88,7 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `player_prestige` | number | |
 | `player_victories` | number | |
 | `opponent_name` | string | |
-| `opponent_account_id` | string | nullable; every valid battle projection is written regardless of opponent account |
+| `opponent_account_id` | string | nullable; the battle row is written only when this equals the metadata-level uploader, or when this account already exists in `seen_player_accounts`; NULL opponents are dropped |
 | `opponent_hero` | string | |
 | `opponent_rank` | string | |
 | `opponent_rating` | number | |
@@ -101,6 +101,8 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `is_final_battle` | boolean | optional; stored as a sticky marker: once true for a `battle_id`, later uploads cannot reset it to false |
 
 For a `battle_id` collision, non-final battle fields use last-writer-wins upsert semantics; `is_final_battle` is the exception and remains sticky once true.
+
+Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set of account ids that have successfully uploaded at least one run; it is seeded from historical `runs.player_account_id` values and then updated from the metadata-level uploader on each new run upload. A battle against a not-yet-seen opponent is accepted at the request level but writes no `battles` row, and the server does not backfill those dropped rows if that opponent uploads later.
 
 ### Response 200 (accepted)
 
@@ -132,7 +134,7 @@ For a `battle_id` collision, non-final battle fields use last-writer-wins upsert
 - `player_account_id` is required and non-empty. Mod must skip upload if account id is unavailable.
 - `run_bundles` table merged into `runs`; `battles.replay_available` wire field removed (was a dead field — always `true` in V3). `battles.player_account_id_in_payload` removed.
 - Bundle-final battle metadata is carried as `is_final_battle`; the old V3 `is_bundle_final_battle` name is not consumed or returned.
-- Former `seen_player_accounts` opponent filtering removed; battle projections are fully ingested.
+- `seen_player_accounts` opponent filtering is active again. It keeps self-battles, keeps battles whose opponent has uploaded at least one run, and drops NULL or never-seen opponents at ingest.
 - R2 key `player_account_id` segment is now always a real id; no `"anonymous-player"` path.
 - JSON `artifact_bytes` upload bodies removed in V5; artifact bytes are transmitted only as the multipart `artifact` part.
 

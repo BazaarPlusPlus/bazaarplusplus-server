@@ -320,6 +320,7 @@ test("POST /run-bundles normalizes far-future battle timestamps", async () => {
             battle_id: "battle-future",
             run_id: "run-future-battle",
             recorded_at_utc: "2999-01-01T00:00:00.000Z",
+            opponent_account_id: "player-001",
           },
         ],
       }),

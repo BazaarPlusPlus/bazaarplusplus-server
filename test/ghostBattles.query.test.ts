@@ -6,11 +6,18 @@ import {
   buildRunBundleMultipartUpload,
   runBundleMetadata,
 } from "./helpers/runBundleUpload";
-import { resetTestState } from "./helpers/seed";
+import { insertSeenPlayerAccount, resetTestState } from "./helpers/seed";
 
 beforeEach(async () => {
   await resetTestState(env);
 });
+
+async function seedSeenPlayerAccount(playerAccountId: string): Promise<void> {
+  await insertSeenPlayerAccount(env.DB, {
+    playerAccountId,
+    firstSeenAtUtc: "2026-05-25T00:00:00.000Z",
+  });
+}
 
 async function uploadBattle(opts: {
   runId: string;
@@ -58,6 +65,7 @@ test("GET /ghost-battles without player_account_id returns 400", async () => {
 });
 
 test("GET /ghost-battles returns battles where opponent_account_id = query param", async () => {
+  await seedSeenPlayerAccount("ghost-target");
   await uploadBattle({ runId: "run-G1", uploader: "uploader-X", opponent: "ghost-target" });
 
   const response = await worker.fetch(
@@ -92,6 +100,7 @@ test("GET /ghost-battles returns battles where opponent_account_id = query param
 });
 
 test("GET /ghost-battles preserves true is_final_battle across later non-final battle upsert", async () => {
+  await seedSeenPlayerAccount("ghost-target");
   await uploadBattle({
     runId: "run-final-first",
     battleId: "shared-final-battle",
