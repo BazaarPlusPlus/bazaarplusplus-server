@@ -219,6 +219,16 @@ function decodeRunBundleParts(
     throw jsonError("invalid_run_bundle_request");
   }
 
+  if (typeof rawBody !== "object" || rawBody == null) {
+    logWarn("run_bundles.upload.reject", {
+      reason: "metadata_not_object",
+      error: "invalid_run_bundle_request",
+      metadata_length: parts.metadata.length,
+      ...failureFields,
+    });
+    throw jsonError("invalid_run_bundle_request");
+  }
+
   if (parts.artifact.contentType !== RunBundleArtifactContentType) {
     logWarn("run_bundles.upload.reject", {
       reason: "artifact_content_type_mismatch",
@@ -346,6 +356,11 @@ export async function handleUploadRunBundle(
     + Number(startedAt.normalized);
   const validBattleProjections: Array<BattleProjection & { recorded_at_utc_normalized: string }> = [];
   for (const battle of battleProjections) {
+    if (typeof battle !== "object" || battle == null) {
+      skippedBattleProjections += 1;
+      continue;
+    }
+
     const battleId = optionalTrimmedString(battle.battle_id);
     if (!battleId) {
       skippedBattleProjections += 1;

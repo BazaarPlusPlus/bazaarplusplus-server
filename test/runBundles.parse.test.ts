@@ -6,7 +6,7 @@ import {
   buildRunBundleMultipartUpload,
   runBundleMetadata,
 } from "./helpers/runBundleUpload";
-import { resetTestState, selectFirst } from "./helpers/seed";
+import { countRows, resetTestState, selectFirst } from "./helpers/seed";
 
 function buildUpload(body: unknown): Request {
   return new Request("https://example.com/run-bundles", {
@@ -308,6 +308,51 @@ test("POST /run-bundles rejects too many battle projections", async () => {
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "too_many_battle_projections" });
+});
+
+test("POST /run-bundles returns 400 invalid_run_bundle_request when metadata JSON is literal null", async () => {
+  const form = new FormData();
+  form.set("metadata", "null");
+  form.set(
+    "artifact",
+    new File([new Uint8Array([1, 2, 3, 4])], "run-bundle.mpack.gz", {
+      type: "application/x-bpp-runbundle+msgpack+gzip",
+    }),
+  );
+
+  const response = await worker.fetch(
+    new Request("https://example.com/run-bundles", { method: "POST", body: form }),
+    env,
+  );
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "invalid_run_bundle_request" });
+});
+
+test("POST /run-bundles skips null battle projection elements and writes the valid ones", async () => {
+  const metadata = runBundleMetadata({ runId: "run-null-battle" });
+  metadata.battle_projections = [
+    null,
+    {
+      battle_id: "battle-null-sibling",
+      run_id: "run-null-battle",
+      opponent_account_id: "player-001",
+    },
+  ];
+
+  const response = await worker.fetch(
+    buildRunBundleMultipartUpload({ metadata }),
+    env,
+  );
+
+  expect(response.status).toBe(200);
+  const row = await selectFirst<{ battle_id: string }>(
+    env.DB,
+    "SELECT battle_id FROM battles WHERE run_id = ?",
+    ["run-null-battle"],
+  );
+  expect(row).toEqual({ battle_id: "battle-null-sibling" });
+  expect(await countRows(env.DB, "battles")).toBe(1);
 });
 
 test("POST /run-bundles normalizes far-future battle timestamps", async () => {

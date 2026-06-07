@@ -51,6 +51,8 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `run_projection` | object (see below) | no (defaults to `{}`) |
 | `battle_projections` | array of battle objects (see below; max 200 items) | no (defaults to `[]`) |
 
+The metadata JSON must decode to an object; any other top-level JSON value (e.g. literal `null`) is rejected with 400 `invalid_run_bundle_request`.
+
 **`run_projection` fields** (all optional unless noted):
 
 | Field | Type |
@@ -100,6 +102,8 @@ Only the `artifact` part's Content-Type is validated; the `metadata` part is acc
 | `loser_combatant_id` | string | |
 | `is_final_battle` | boolean | optional; stored as a sticky marker: once true for a `battle_id`, later uploads cannot reset it to false |
 
+Non-object `battle_projections[]` elements (e.g. literal `null`) are skipped the same way as projections without a `battle_id`; the rest of the bundle is still accepted.
+
 For a `battle_id` collision, non-final battle fields use last-writer-wins upsert semantics; `is_final_battle` is the exception and remains sticky once true.
 
 Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set of account ids that have successfully uploaded at least one run; it is seeded from historical `runs.player_account_id` values and then updated from the metadata-level uploader on each new run upload. A battle against a not-yet-seen opponent is accepted at the request level but writes no `battles` row, and the server does not backfill those dropped rows if that opponent uploads later.
@@ -122,7 +126,7 @@ Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set
 
 | Status | `error` code | Condition |
 |---|---|---|
-| 400 | `invalid_run_bundle_request` | Malformed multipart body, missing/invalid multipart part, missing/invalid required field (`player_account_id` or `run_id`), or invalid artifact part Content-Type |
+| 400 | `invalid_run_bundle_request` | Malformed multipart body, missing/invalid multipart part, non-object metadata JSON, missing/invalid required field (`player_account_id` or `run_id`), or invalid artifact part Content-Type |
 | 400 | `too_many_battle_projections` | More than 200 battle projections were supplied |
 | 413 | `payload_too_large` | Declared request body exceeds 8 MiB, or artifact part is empty or larger than 8 MiB |
 | 415 | `unsupported_content_type` | Request is not `multipart/form-data` |
