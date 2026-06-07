@@ -21,12 +21,6 @@ type ProjectSuccess<TProject> = {
   value: TProject;
 };
 
-type CleanupCallbackArgs<TCommitted> = {
-  error: unknown;
-  objectKey: string;
-  committed: TCommitted | null;
-};
-
 export type PutThenProjectResult<TProject, TCommitted> =
   | ProjectSuccess<TProject>
   | ProjectFailure<TCommitted>;
@@ -41,14 +35,6 @@ export async function putThenProject<TProject, TCommitted>(options: {
   isObjectReferenced: (committed: TCommitted) => boolean;
   onPutSucceeded?: () => void;
   onPutFailed?: (error: unknown) => void;
-  onProjectObjectDeleted?: (args: CleanupCallbackArgs<TCommitted>) => void;
-  onProjectObjectKept?: (args: CleanupCallbackArgs<TCommitted>) => void;
-  onProjectObjectOrphaned?: (
-    args: CleanupCallbackArgs<TCommitted> & { cleanupError: unknown },
-  ) => void;
-  onReferenceLookupFailed?: (
-    args: CleanupCallbackArgs<TCommitted> & { referenceLookupError: unknown },
-  ) => void;
 }): Promise<PutThenProjectResult<TProject, TCommitted>> {
   try {
     await options.bucket.put(options.objectKey, options.value, options.putOptions);
@@ -65,12 +51,6 @@ export async function putThenProject<TProject, TCommitted>(options: {
     try {
       committed = await options.findCommitted();
     } catch (referenceLookupError) {
-      options.onReferenceLookupFailed?.({
-        error,
-        objectKey: options.objectKey,
-        committed: null,
-        referenceLookupError,
-      });
       return {
         ok: false,
         error,
@@ -81,29 +61,13 @@ export async function putThenProject<TProject, TCommitted>(options: {
     }
 
     if (committed != null && options.isObjectReferenced(committed)) {
-      options.onProjectObjectKept?.({
-        error,
-        objectKey: options.objectKey,
-        committed,
-      });
       return { ok: false, error, committed, cleanup: "kept" };
     }
 
     try {
       await options.bucket.delete(options.objectKey);
-      options.onProjectObjectDeleted?.({
-        error,
-        objectKey: options.objectKey,
-        committed,
-      });
       return { ok: false, error, committed, cleanup: "deleted" };
     } catch (cleanupError) {
-      options.onProjectObjectOrphaned?.({
-        error,
-        objectKey: options.objectKey,
-        committed,
-        cleanupError,
-      });
       return { ok: false, error, committed, cleanup: "orphaned", cleanupError };
     }
   }

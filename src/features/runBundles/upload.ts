@@ -491,44 +491,49 @@ export async function handleUploadRunBundle(
         outcome: "r2_put_failed",
       });
     },
-    onProjectObjectKept: ({ error }) => {
-      logWarn("run_bundles.upload", {
-        run_id: runId,
-        object_key: objectKey,
-        error: String(error),
-        outcome: "d1_batch_failed_existing_object_kept",
-      });
-    },
-    onProjectObjectDeleted: ({ error, committed }) => {
-      logWarn("run_bundles.upload", {
-        run_id: runId,
-        object_key: objectKey,
-        error: String(error),
-        outcome:
-          committed == null
-            ? "d1_batch_failed_r2_cleaned"
-            : "d1_batch_failed_raced_object_cleaned",
-      });
-    },
-    onProjectObjectOrphaned: ({ error, cleanupError }) => {
-      logWarn("run_bundles.upload", {
-        run_id: runId,
-        object_key: objectKey,
-        error: String(error),
-        cleanup_error: String(cleanupError),
-        outcome: "d1_batch_failed_r2_orphaned",
-      });
-    },
-    onReferenceLookupFailed: ({ error, referenceLookupError }) => {
-      logWarn("run_bundles.upload", {
-        run_id: runId,
-        object_key: objectKey,
-        error: String(error),
-        reference_lookup_error: String(referenceLookupError),
-        outcome: "d1_batch_failed_reference_lookup_failed",
-      });
-    },
   });
+
+  if (!projectResult.ok) {
+    switch (projectResult.cleanup) {
+      case "kept":
+        logWarn("run_bundles.upload", {
+          run_id: runId,
+          object_key: objectKey,
+          error: String(projectResult.error),
+          outcome: "d1_batch_failed_existing_object_kept",
+        });
+        break;
+      case "deleted":
+        logWarn("run_bundles.upload", {
+          run_id: runId,
+          object_key: objectKey,
+          error: String(projectResult.error),
+          outcome:
+            projectResult.committed == null
+              ? "d1_batch_failed_r2_cleaned"
+              : "d1_batch_failed_raced_object_cleaned",
+        });
+        break;
+      case "orphaned":
+        logWarn("run_bundles.upload", {
+          run_id: runId,
+          object_key: objectKey,
+          error: String(projectResult.error),
+          cleanup_error: String(projectResult.cleanupError),
+          outcome: "d1_batch_failed_r2_orphaned",
+        });
+        break;
+      case "reference_lookup_failed":
+        logWarn("run_bundles.upload", {
+          run_id: runId,
+          object_key: objectKey,
+          error: String(projectResult.error),
+          reference_lookup_error: String(projectResult.referenceLookupError),
+          outcome: "d1_batch_failed_reference_lookup_failed",
+        });
+        break;
+    }
+  }
 
   if (projectResult.ok) {
     const batchResults = projectResult.value;

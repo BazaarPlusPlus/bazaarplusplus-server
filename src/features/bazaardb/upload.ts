@@ -120,43 +120,46 @@ export async function handleUploadBazaarDbSnapshot(
     onPutSucceeded: () => {
       r2PutMs = Date.now() - r2Start;
     },
-    onProjectObjectKept: ({ error }) => {
-      logWarn("bazaardb.snapshot_upload", {
-        snapshot_id: normalizedSnapshotId,
-        r2_key: r2Key,
-        error: String(error),
-        outcome: "d1_insert_failed_existing_object_kept",
-      });
-    },
-    onProjectObjectDeleted: ({ error }) => {
-      logWarn("bazaardb.snapshot_upload", {
-        snapshot_id: normalizedSnapshotId,
-        r2_key: r2Key,
-        error: String(error),
-        outcome: "d1_insert_failed_r2_cleaned",
-      });
-    },
-    onProjectObjectOrphaned: ({ error, cleanupError }) => {
-      logWarn("bazaardb.snapshot_upload", {
-        snapshot_id: normalizedSnapshotId,
-        r2_key: r2Key,
-        error: String(error),
-        cleanup_error: String(cleanupError),
-        outcome: "d1_insert_failed_r2_orphaned",
-      });
-    },
-    onReferenceLookupFailed: ({ error, referenceLookupError }) => {
-      logWarn("bazaardb.snapshot_upload", {
-        snapshot_id: normalizedSnapshotId,
-        r2_key: r2Key,
-        error: String(error),
-        reference_lookup_error: String(referenceLookupError),
-        outcome: "d1_insert_failed_reference_lookup_failed",
-      });
-    },
   });
 
   if (!projectResult.ok) {
+    switch (projectResult.cleanup) {
+      case "kept":
+        logWarn("bazaardb.snapshot_upload", {
+          snapshot_id: normalizedSnapshotId,
+          r2_key: r2Key,
+          error: String(projectResult.error),
+          outcome: "d1_insert_failed_existing_object_kept",
+        });
+        break;
+      case "deleted":
+        logWarn("bazaardb.snapshot_upload", {
+          snapshot_id: normalizedSnapshotId,
+          r2_key: r2Key,
+          error: String(projectResult.error),
+          outcome: "d1_insert_failed_r2_cleaned",
+        });
+        break;
+      case "orphaned":
+        logWarn("bazaardb.snapshot_upload", {
+          snapshot_id: normalizedSnapshotId,
+          r2_key: r2Key,
+          error: String(projectResult.error),
+          cleanup_error: String(projectResult.cleanupError),
+          outcome: "d1_insert_failed_r2_orphaned",
+        });
+        break;
+      case "reference_lookup_failed":
+        logWarn("bazaardb.snapshot_upload", {
+          snapshot_id: normalizedSnapshotId,
+          r2_key: r2Key,
+          error: String(projectResult.error),
+          reference_lookup_error: String(projectResult.referenceLookupError),
+          outcome: "d1_insert_failed_reference_lookup_failed",
+        });
+        break;
+    }
+
     const racedExisting = projectResult.committed;
     if (racedExisting) {
       return ok(normalizedSnapshotId, racedExisting.uploaded_at_utc);
