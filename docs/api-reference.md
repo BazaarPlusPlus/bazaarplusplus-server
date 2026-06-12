@@ -352,7 +352,7 @@ Claim the next BazaarDB delivery batch. At most one unexpired peek batch may be 
 { "max_items": 10 }
 ```
 
-`max_items` defaults to 10, is floored to an integer, and is clamped to the range 1–10 (non-finite or non-numeric values fall back to 10).
+`max_items` is floored to an integer and clamped to the range 1–50. When the field is missing, non-finite, or non-numeric it falls back to the default of 10 — omitting `max_items` keeps the original batch size; larger batches are strictly opt-in.
 
 The JSON body is parsed only when the `Content-Type` media type is `application/json` (parameters such as `charset` are allowed; matching is case-insensitive). Any other media type is treated as an empty body, so the defaults apply.
 
@@ -435,7 +435,7 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 | 401 | (empty) | Missing or incorrect bearer token |
 | 400 | `{ "error": "missing_peek_id" }` | `peek_id` is missing or blank |
 | 400 | `{ "error": "missing_snapshot_ids" }` | `snapshot_ids` is missing, not an array, or contains no non-empty ids |
-| 400 | `{ "error": "too_many_snapshot_ids" }` | More than 10 unique non-empty ids were supplied |
+| 400 | `{ "error": "too_many_snapshot_ids" }` | More than 50 unique non-empty ids were supplied |
 | 500 | `{ "error": "internal_error" }` | Unexpected failure (e.g. D1 unavailable) |
 
 ---

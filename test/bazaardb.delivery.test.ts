@@ -44,15 +44,15 @@ async function seedDelivery(
   return r2Key;
 }
 
-function peekRequest(maxItems = 10): Request {
+function peekRequest(maxItems?: number): Request {
   return new Request("https://example.com/bazaardb/peek", {
     method: "POST",
     headers: { ...PullAuth, "content-type": "application/json" },
-    body: JSON.stringify({ max_items: maxItems }),
+    body: JSON.stringify(maxItems == null ? {} : { max_items: maxItems }),
   });
 }
 
-async function peek(maxItems = 10): Promise<Response> {
+async function peek(maxItems?: number): Promise<Response> {
   return worker.fetch(peekRequest(maxItems), env);
 }
 
@@ -331,11 +331,49 @@ test("confirm marks only requested DTOs done and deletes their R2 objects", asyn
 test("confirm rejects more snapshot ids than the peek batch maximum", async () => {
   const response = await confirm(
     "pk_overflow",
-    Array.from({ length: 11 }, (_, index) => `snap-${index}`),
+    Array.from({ length: 51 }, (_, index) => `snap-${index}`),
   );
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "too_many_snapshot_ids" });
+});
+
+test("explicit max_items claims and confirms batches above 10 while the no-max_items default stays 10", async () => {
+  for (let index = 0; index < 12; index += 1) {
+    const seconds = String(index).padStart(2, "0");
+    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`, {
+      putObject: false,
+    });
+  }
+
+  const bigPeek = await peek(50);
+  expect(bigPeek.status).toBe(200);
+  const bigBody = (await bigPeek.json()) as {
+    peek_id: string;
+    items: Array<{ snapshot_id: string }>;
+  };
+  expect(bigBody.items).toHaveLength(12);
+
+  const confirmed = await confirm(
+    bigBody.peek_id,
+    bigBody.items.map((item) => item.snapshot_id),
+  );
+  expect(confirmed.status).toBe(200);
+  expect(((await confirmed.json()) as { count: number }).count).toBe(12);
+
+  for (let index = 12; index < 23; index += 1) {
+    const seconds = String(index).padStart(2, "0");
+    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`, {
+      putObject: false,
+    });
+  }
+
+  const defaultPeek = await peek();
+  expect(defaultPeek.status).toBe(200);
+  const defaultBody = (await defaultPeek.json()) as {
+    items: Array<{ snapshot_id: string }>;
+  };
+  expect(defaultBody.items).toHaveLength(10);
 });
 
 test("expired leases can be reclaimed with a new peek id", async () => {
