@@ -1,7 +1,7 @@
 # V4 API Reference
 
 **Host:** `mod-api-v4.bazaarplusplus.com`
-**Auth model:** No token auth for mod-facing endpoints. `POST /bazaardb/peek` and `POST /bazaardb/confirm` require a bearer token. All `player_account_id` fields are required; the server does not synthesize sentinel fallbacks.
+**Auth model:** No token auth for mod-facing endpoints. `POST /bazaardb/peek`, `POST /bazaardb/confirm`, and `POST /run-bundles/:run_id/download-link` require a bearer token (`BAZAARDB_PULL_TOKEN`). All `player_account_id` fields are required; the server does not synthesize sentinel fallbacks.
 **Error shape:** `{ "error": "<code>" }` unless noted otherwise.
 **CORS:** All endpoints accept preflight (`OPTIONS`).
 
@@ -254,6 +254,145 @@ No request body.
 - `expires_at_utc` field name unchanged.
 - `GET /replays/:token` endpoint removed; token-based replay download no longer exists.
 - `replay_available` is no longer consulted; artifact presence is determined by `R2.head()` at request time.
+
+---
+
+## POST /run-bundles/:run_id/download-link
+
+Generate a 5-minute R2 presigned download URL for a run bundle artifact by `run_id`. This is the run-keyed counterpart to `replay-link`: the run bundle is the whole-run artifact, so this route and any of that run's `replay-link` calls resolve to the same `runs.object_key` and sign the same object.
+
+**Purely additive.** This route was a new addition only — a new handler plus one route registration. No existing endpoint, schema, object key, or stored byte changed; `runs`/`battles`/`bazaardb_delivery` are untouched, and run bundles are uploaded and stored exactly as before. A consumer that ignores this route sees no behavior change.
+
+**Auth:** `Authorization: Bearer <BAZAARDB_PULL_TOKEN>` required (same token as the BazaarDB pull endpoints). Missing or wrong token → 401 (no body). Unlike `replay-link`, this route is not mod-facing: the intended consumer is the BazaarDB partner pull, which reads `run.id` from a pulled snapshot and exchanges it for the bundle.
+
+### Path parameter
+
+| Param | Type | Notes |
+|---|---|---|
+| `:run_id` | string | URL-encoded; malformed percent-encoding → 400 |
+
+No request body.
+
+### Response 200
+
+```json
+{
+  "run_id": "string",
+  "download_url": "string",
+  "expires_at_utc": "string",
+  "codec": "application/x-bpp-runbundle+msgpack+gzip",
+  "schema_version": 5,
+  "size_bytes": 123456
+}
+```
+
+`download_url` is a 5-minute SigV4 presigned R2 URL; GET it directly, no Worker proxy. After it expires R2 may return 403, so request a fresh link rather than scheduling against the exact `expires_at_utc` boundary. `codec`, `schema_version`, and `size_bytes` are echoed from the `runs` row so the consumer can frame/decode the artifact without a separate metadata call (the downloaded artifact body does not carry `schema_version`).
+
+### Errors
+
+| Status | `error` code | Condition |
+|---|---|---|
+| 400 | `bad_request` | Malformed percent-encoding in `:run_id` path segment |
+| 401 | (no body) | Missing or wrong bearer token |
+| 404 | `run_not_found` | No `runs` row with that `run_id` |
+| 410 | `artifact_expired` | Run row exists but `RUN_BUNDLE_BUCKET.head(object_key)` returned null (object deleted by R2 lifecycle) |
+| 500 | `internal_error` | Unexpected failure (e.g. R2 presign secrets missing, D1 unavailable) |
+
+### Downloaded artifact
+
+GET the `download_url`; the bytes are the run bundle, **not JSON**. Framing:
+
+- Content type `application/x-bpp-runbundle+msgpack+gzip`; `codec` in the response echoes this.
+- The bytes are a gzip stream (first two bytes `0x1F 0x8B`). Gunzip, then decode the result as **MessagePack** (not JSON).
+- The MessagePack map is keyed by **C# property names** (`RunId`, `Battles`, `Snapshots`, `ReplayPayload`, …) — PascalCase, *not* the snake_case used by the upload metadata. Do not decode it as snake_case.
+- `schema_version` is upload metadata (echoed in this response); it is **not** present inside the artifact body.
+
+Top-level decoded shape:
+
+```ts
+interface RunArtifact {
+  RunId: string;
+  Battles: RunArtifactBattle[];
+}
+
+interface RunArtifactBattle {
+  BattleId: string;
+  Manifest: {
+    BattleId: string | null;
+    RecordedAtUtc: string;
+    Day: number | null; Hour: number | null;
+    EncounterId: string | null; CombatKind: string | null;
+    Result: string | null;
+    WinnerCombatantId: string | null; LoserCombatantId: string | null;
+  };
+  Participants: {
+    // Player* and Opponent* pairs:
+    PlayerName: string | null; PlayerAccountId: string | null; PlayerHero: string | null;
+    PlayerRank: string | null; PlayerRating: number | null; PlayerLevel: number | null;
+    PlayerPrestige: number | null; PlayerVictories: number | null;
+    OpponentName: string | null; OpponentAccountId: string | null; OpponentHero: string | null;
+    OpponentRank: string | null; OpponentRating: number | null; OpponentLevel: number | null;
+    OpponentPrestige: number | null; OpponentVictories: number | null;
+  };
+  Snapshots: {
+    // Exactly four CardSets per battle, in order:
+    // player_hand, player_skills, opponent_hand, opponent_skills.
+    CardSets: Array<{
+      Label: string;            // e.g. "player_hand"
+      Status: string | null;    // Missing | CapturedEmpty | Captured
+      Source: string | null;    // Unknown | OpeningMessage | LiveRetry
+      Items: Array<{
+        InstanceId: string; TemplateId: string;
+        Type: number;             // ECardType (0=Item, 1=Skill, …)
+        Size: number;             // ECardSize (1=Small, 2=Medium, 3=Large)
+        Section: number | null;   // EInventorySection (0=Hand, 1=Stash)
+        Socket: number | null;    // EContainerSocketId (0..9)
+        Name: string | null; Tier: string | null; Enchant: string | null;
+        Tags: string[];
+        Attributes: Record<string, number>;
+      }>;
+    }>;
+  };
+  ReplayPayload: {
+    BattleId: string;
+    Version: number;
+    // Raw game net messages, MessagePack/LZ4 — NOT JSON. Consumers that only
+    // need card snapshots + metadata can ignore these three byte arrays.
+    SpawnMessageBytes: Uint8Array;
+    CombatMessageBytes: Uint8Array;
+    DespawnMessageBytes: Uint8Array;
+  };
+}
+```
+
+The exhaustive per-field reference and full numeric-enum tables live in the mod-side contract: `bazaarplusplus-mod/docs/drafts/2026-06-24-run-bundle-artifact-download-contract.md`.
+
+#### Decode examples
+
+Node.js:
+
+```ts
+import { gunzipSync } from "node:zlib";
+import { decode } from "@msgpack/msgpack";
+
+const compressed = new Uint8Array(await (await fetch(downloadUrl)).arrayBuffer());
+const artifact = decode(gunzipSync(compressed)) as RunArtifact;
+console.log(artifact.RunId, artifact.Battles[0]?.Snapshots.CardSets);
+```
+
+Python:
+
+```py
+import gzip, msgpack, urllib.request
+
+raw = urllib.request.urlopen(download_url).read()
+artifact = msgpack.unpackb(gzip.decompress(raw), raw=False)
+print(artifact["RunId"], artifact["Battles"][0]["Snapshots"]["CardSets"])
+```
+
+### Retention
+
+The run bundle object is **auto-deleted by an R2 lifecycle rule** (configured in the Cloudflare dashboard, not in this repo) — currently **~7 days** after upload. The wire contract only guarantees a retention floor of **≥ 5 days** (the `GET /ghost-battles` lookback window); the dashboard value sits at or above that floor. After the object ages out the `runs` row persists, so this route returns **410 `artifact_expired`** rather than 404. Download promptly after reading `run.id` from a snapshot; do not assume a bundle is retrievable indefinitely.
 
 ---
 

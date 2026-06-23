@@ -5,6 +5,7 @@ import { handleUploadBazaarDbSnapshot } from "./features/bazaardb/upload";
 import { handleQueryGhostBattles } from "./features/ghostBattles/query";
 import { handleCreateReplayLink } from "./features/ghostBattles/replayLink";
 import { handleHealth } from "./features/health";
+import { handleCreateRunBundleDownloadLink } from "./features/runBundles/downloadLink";
 import { handleUploadRunBundle } from "./features/runBundles/upload";
 import { preflight, withCors } from "./http/cors";
 import { jsonError } from "./http/json";
@@ -25,6 +26,14 @@ type StaticRoute = {
 const Routes: StaticRoute[] = [
   { method: "GET", pattern: /^\/health$/, handle: () => handleHealth() },
   { method: "POST", pattern: /^\/run-bundles$/, handle: handleUploadRunBundle },
+  {
+    method: "POST",
+    pattern: /^\/run-bundles\/([^/]+)\/download-link$/,
+    paramNames: ["run_id"],
+    decodeErrorCode: "bad_request",
+    handle: (request, env, params) =>
+      handleCreateRunBundleDownloadLink(request, env, params.run_id),
+  },
   { method: "GET", pattern: /^\/ghost-battles$/, handle: handleQueryGhostBattles },
   { method: "POST", pattern: /^\/bazaardb\/peek$/, handle: handlePeekBazaarDbSnapshots },
   { method: "POST", pattern: /^\/bazaardb\/confirm$/, handle: handleConfirmBazaarDbSnapshots },
