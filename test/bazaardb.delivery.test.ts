@@ -190,7 +190,7 @@ test("re-upload of any existing snapshot id is a no-op and does not replace R2",
 
 test("POST /bazaardb/peek claims oldest pending rows and returns presigned URLs", async () => {
   await seedDelivery("snap-b", "2026-06-03T00:00:02.000Z");
-  await seedDelivery("snap-a", "2026-06-03T00:00:01.000Z", { putObject: false });
+  await seedDelivery("snap-a", "2026-06-03T00:00:01.000Z");
 
   const response = await peek();
 
@@ -346,9 +346,7 @@ test("confirm rejects more snapshot ids than the peek batch maximum", async () =
 test("explicit max_items claims and confirms batches above 10 while the no-max_items default stays 10", async () => {
   for (let index = 0; index < 12; index += 1) {
     const seconds = String(index).padStart(2, "0");
-    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`, {
-      putObject: false,
-    });
+    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`);
   }
 
   const bigPeek = await peek(50);
@@ -368,9 +366,7 @@ test("explicit max_items claims and confirms batches above 10 while the no-max_i
 
   for (let index = 12; index < 23; index += 1) {
     const seconds = String(index).padStart(2, "0");
-    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`, {
-      putObject: false,
-    });
+    await seedDelivery(`snap-bulk-${seconds}`, `2026-06-03T00:00:${seconds}.000Z`);
   }
 
   const defaultPeek = await peek();
@@ -466,6 +462,47 @@ test("409 peek_outstanding re-presigns the leased batch and does not burn an att
     "SELECT delivery_attempts FROM bazaardb_delivery ORDER BY snapshot_id",
   ).all<{ delivery_attempts: number }>();
   expect(attempts.results.map((r) => r.delivery_attempts)).toEqual([1, 1]);
+});
+
+test("peek fails snapshots whose R2 object is gone and excludes them from items", async () => {
+  await seedDelivery("snap-gone", "2026-06-03T00:00:01.000Z", { putObject: false });
+  await seedDelivery("snap-live", "2026-06-03T00:00:02.000Z");
+
+  const response = await peek();
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    peek_id: string;
+    items: Array<{ snapshot_id: string }>;
+  };
+  expect(body.items.map((i) => i.snapshot_id)).toEqual(["snap-live"]);
+
+  const rows = await env.DB.prepare(
+    "SELECT snapshot_id, delivery_state, failure_reason, lease_peek_id FROM bazaardb_delivery ORDER BY snapshot_id",
+  ).all<{ snapshot_id: string; delivery_state: string; failure_reason: string | null; lease_peek_id: string | null }>();
+  expect(rows.results).toEqual([
+    { snapshot_id: "snap-gone", delivery_state: "failed", failure_reason: "object_gone", lease_peek_id: null },
+    { snapshot_id: "snap-live", delivery_state: "pending", failure_reason: null, lease_peek_id: body.peek_id },
+  ]);
+});
+
+test("peek returns an empty batch (peek_id null) when every claimed object is gone", async () => {
+  await seedDelivery("snap-allgone-a", "2026-06-03T00:00:01.000Z", { putObject: false });
+  await seedDelivery("snap-allgone-b", "2026-06-03T00:00:02.000Z", { putObject: false });
+
+  const response = await peek();
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ peek_id: null, items: [] });
+
+  const failed = await selectFirst<{ n: number }>(
+    env.DB,
+    "SELECT COUNT(*) AS n FROM bazaardb_delivery WHERE delivery_state = 'failed' AND failure_reason = 'object_gone'",
+  );
+  expect(failed?.n).toBe(2);
+
+  // Lease slot is freed, so a fresh peek is not 409-locked.
+  const next = await peek();
+  expect(next.status).toBe(200);
+  expect(await next.json()).toEqual({ peek_id: null, items: [] });
 });
 
 test("max-attempt pending rows fail terminally and leave their R2 objects for lifecycle cleanup", async () => {

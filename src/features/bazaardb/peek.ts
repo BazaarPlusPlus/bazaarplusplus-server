@@ -91,6 +91,48 @@ async function presignItems(
   );
 }
 
+async function splitByObjectPresence(
+  env: Env,
+  rows: ClaimedDeliveryRow[],
+): Promise<{ live: ClaimedDeliveryRow[]; gone: ClaimedDeliveryRow[] }> {
+  const heads = await Promise.all(rows.map((row) => env.BAZAARDB_BUCKET.head(row.r2_key)));
+  const live: ClaimedDeliveryRow[] = [];
+  const gone: ClaimedDeliveryRow[] = [];
+  rows.forEach((row, index) => (heads[index] == null ? gone : live).push(row));
+  return { live, gone };
+}
+
+async function failGoneRows(
+  env: Env,
+  peekId: string,
+  gone: ClaimedDeliveryRow[],
+  nowUtc: string,
+): Promise<void> {
+  if (gone.length === 0) return;
+  const placeholders = gone.map(() => "?").join(", ");
+  await env.DB.prepare(
+    `
+      UPDATE bazaardb_delivery
+      SET delivery_state = 'failed',
+          failed_at_utc = ?,
+          failure_reason = 'object_gone',
+          state_updated_at_utc = ?,
+          lease_peek_id = NULL,
+          lease_until_utc = NULL
+      WHERE lease_peek_id = ?
+        AND delivery_state = 'pending'
+        AND snapshot_id IN (${placeholders})
+    `,
+  )
+    .bind(nowUtc, nowUtc, peekId, ...gone.map((row) => row.snapshot_id))
+    .run();
+  logWarn("bazaardb.peek", {
+    peek_id: peekId,
+    gone_count: gone.length,
+    outcome: "object_gone_failed",
+  });
+}
+
 export async function handlePeekBazaarDbSnapshots(
   request: Request,
   env: Env,
@@ -170,11 +212,26 @@ export async function handlePeekBazaarDbSnapshots(
     return json({ peek_id: null, items: [] });
   }
 
-  const items = await presignItems(presigner, claim.results);
+  const { live, gone } = await splitByObjectPresence(env, claim.results);
+  await failGoneRows(env, peekId, gone, nowUtc);
+
+  if (live.length === 0) {
+    logInfo("bazaardb.peek", {
+      peek_id: peekId,
+      item_count: 0,
+      gone_count: gone.length,
+      phase_ms: { total: Date.now() - phaseStart },
+      outcome: "all_gone",
+    });
+    return json({ peek_id: null, items: [] });
+  }
+
+  const items = await presignItems(presigner, live);
 
   logInfo("bazaardb.peek", {
     peek_id: peekId,
     item_count: items.length,
+    gone_count: gone.length,
     phase_ms: { total: Date.now() - phaseStart },
     outcome: "ok",
   });

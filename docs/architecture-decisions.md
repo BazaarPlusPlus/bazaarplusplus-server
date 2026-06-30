@@ -54,6 +54,8 @@ NULL opponents are dropped (SQL three-valued logic naturally excludes them).
 
 Delivery is at-least-once within at most 3 peek claims. After 3 claims without confirm, a snapshot is marked `failed` — terminal state, never re-queued. The R2 object is not deleted immediately on failure; cleanup is deferred to the bucket lifecycle rule.
 
+`peek` `head()`s each claimed object before presigning. A row whose R2 object is already lifecycle-deleted is marked `failed` with `failure_reason='object_gone'` (distinct from `max_delivery_attempts`) and excluded from the batch, rather than served as a dead presigned URL.
+
 Re-uploading the same `snapshot_id` is a no-op once any row exists (regardless of state). The server does not revive failed rows.
 
 ## Analyzers Coupling

@@ -127,7 +127,7 @@ To resolve a `409`, use the returned `items` to re-download the outstanding batc
 
 Treat 600 seconds from `peek` as a hard deadline for `confirm`, and keep the full peek → download → persist → confirm cycle comfortably inside it.
 
-**Failed is a terminal state.** A failed snapshot is never re-queued or re-delivered, and the queue treats its data as lost. The stored object is not deleted immediately — it is removed later by a storage lifecycle rule — but no API exists to retrieve or revive a failed snapshot, and re-uploading the same `snapshot_id` does not revive it. If the pull job repeatedly exhausts snapshots (persistent download failures, or confirms missing the lease window), contact BazaarPlusPlus promptly: the server raises an internal alarm on mass delivery failures, but recovery is not automatic.
+**Failed is a terminal state.** A failed snapshot is never re-queued or re-delivered, and the queue treats its data as lost. The stored object is not deleted immediately — it is removed later by a storage lifecycle rule — but no API exists to retrieve or revive a failed snapshot, and re-uploading the same `snapshot_id` does not revive it. If the pull job repeatedly exhausts snapshots (persistent download failures, or confirms missing the lease window), contact BazaarPlusPlus promptly: the server raises an internal alarm on mass delivery failures, but recovery is not automatic. A snapshot whose stored object has aged out of the lifecycle window is also reported as failed (`failure_reason='object_gone'`) and never appears in a peek batch.
 
 ### Confirm
 

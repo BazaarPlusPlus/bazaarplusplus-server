@@ -518,6 +518,8 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 { "peek_id": null, "items": [] }
 ```
 
+Snapshots whose R2 object has already been removed by the bucket lifecycle rule are not presigned: `peek` marks each such row `failed` with `failure_reason='object_gone'` and omits it from `items`. If an entire claimed batch is gone, the response is the empty `{ "peek_id": null, "items": [] }`. This prevents handing out 404-bound URLs and the silent attempt-burn that previously followed (see the snapshot retention invariant under Data retention).
+
 ### Response 409 outstanding lease
 
 ```json
