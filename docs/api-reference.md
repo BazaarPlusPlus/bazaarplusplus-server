@@ -585,6 +585,7 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 - Run-bundle R2 objects are governed by an R2 lifecycle rule configured in the Cloudflare dashboard (outside this repo). **Invariant: the run-bundle retention horizon must be ≥ 5 days**, the `GET /ghost-battles` lookback window — if retention drops below that, `replay-link` starts returning 410 `artifact_expired` for battles still inside the ghost window, with no other signal.
 - D1 rows whose R2 object has been lifecycle-deleted ("orphan rows") are expected and harmless; `replay-link` surfaces them as 410 `artifact_expired`.
 - `bazaardb_delivery` rows in `done`/`failed` are retained indefinitely as the idempotency ledger for snapshot re-uploads. `done` objects are deleted eagerly at confirm time; `failed` objects are left to the BazaarDB bucket's R2 lifecycle rule.
+- BazaarDB snapshot R2 objects are governed by an R2 lifecycle rule (CF dashboard). **Invariant: the snapshot retention horizon must exceed the partner's worst-case pull lag (target ≥ 7 days).** If retention drops below the lag, `peek` fails the aged-out rows as `object_gone` rather than presigning dead URLs.
 
 ## BazaarDB clean-break notes
 

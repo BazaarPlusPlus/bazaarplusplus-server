@@ -48,6 +48,7 @@ NULL opponents are dropped (SQL three-valued logic naturally excludes them).
 - Run-bundle R2 objects are governed by an R2 lifecycle rule in the CF dashboard (not in code). **Invariant: retention must be >= 5 days** (the ghost query lookback window). Below that, `replay-link` silently returns 410 for in-window battles.
 - Orphan D1 rows (whose R2 object has expired) are expected; `replay-link` surfaces them as 410 `artifact_expired`.
 - BazaarDB `done` objects are deleted at confirm time. `failed` objects are left to the bucket's R2 lifecycle rule.
+- **Invariant: BazaarDB snapshot retention must exceed the partner's worst-case pull lag (target >= 7 days).** The snapshot bucket lifecycle is set in the CF dashboard. Below this floor, objects age out while their `bazaardb_delivery` row is still `pending`; `peek` then marks such rows `failed` with `failure_reason='object_gone'` (accepted loss) — there is no other signal.
 
 ## BazaarDB Delivery Semantics
 
