@@ -477,11 +477,11 @@ test("peek fails snapshots whose R2 object is gone and excludes them from items"
   expect(body.items.map((i) => i.snapshot_id)).toEqual(["snap-live"]);
 
   const rows = await env.DB.prepare(
-    "SELECT snapshot_id, delivery_state, failure_reason, lease_peek_id FROM bazaardb_delivery ORDER BY snapshot_id",
-  ).all<{ snapshot_id: string; delivery_state: string; failure_reason: string | null; lease_peek_id: string | null }>();
+    "SELECT snapshot_id, delivery_state, failure_reason, failed_at_utc, lease_peek_id FROM bazaardb_delivery ORDER BY snapshot_id",
+  ).all<{ snapshot_id: string; delivery_state: string; failure_reason: string | null; failed_at_utc: string | null; lease_peek_id: string | null }>();
   expect(rows.results).toEqual([
-    { snapshot_id: "snap-gone", delivery_state: "failed", failure_reason: "object_gone", lease_peek_id: null },
-    { snapshot_id: "snap-live", delivery_state: "pending", failure_reason: null, lease_peek_id: body.peek_id },
+    { snapshot_id: "snap-gone", delivery_state: "failed", failure_reason: "object_gone", failed_at_utc: expect.stringMatching(/Z$/), lease_peek_id: null },
+    { snapshot_id: "snap-live", delivery_state: "pending", failure_reason: null, failed_at_utc: null, lease_peek_id: body.peek_id },
   ]);
 });
 
