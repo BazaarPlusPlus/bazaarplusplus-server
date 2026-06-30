@@ -1,0 +1,28 @@
+src/features/bazaardb/peek.ts
+  s_13bbfac281f407::t_d7992d54b7b295 129-142
+  s_13bbfac281f407::t_0a0496fb1d95ca 211-213,219
+test/bazaardb.delivery.test.ts
+  s_13bbfac281f407::t_29f85e985a3bea 508-592
+docs/api-reference.md
+  s_13bbfac281f407::t_c24ba6f92a7600 538-539
+docs/architecture-decisions.md
+  s_13bbfac281f407::t_d1b47e863b00bf 57-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "3b260208354fd981258f2af6701263bb55da944a",
+  "prompts": {},
+  "sessions": {
+    "s_13bbfac281f407": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "07424926-4ac6-4d7b-867d-d11a8c1e44d0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Xinyu YANG <cauyxy@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
