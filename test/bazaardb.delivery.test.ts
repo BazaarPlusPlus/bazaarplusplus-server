@@ -281,11 +281,16 @@ test("peek is bearer-gated and returns 409 while a previous lease is outstanding
 
   const second = await peek();
   expect(second.status).toBe(409);
-  expect(await second.json()).toEqual({
-    status: "peek_outstanding",
-    peek_id: firstBody.peek_id,
-    lease_expires_at_utc: firstBody.lease_expires_at_utc,
-  });
+  const secondBody = (await second.json()) as {
+    status: string;
+    peek_id: string;
+    lease_expires_at_utc: string;
+    items: Array<{ snapshot_id: string; download_url: string }>;
+  };
+  expect(secondBody.status).toBe("peek_outstanding");
+  expect(secondBody.peek_id).toBe(firstBody.peek_id);
+  expect(secondBody.lease_expires_at_utc).toBe(firstBody.lease_expires_at_utc);
+  expect(secondBody.items.map((i) => i.snapshot_id)).toEqual(["snap-locked"]);
 });
 
 test("confirm marks only requested DTOs done and deletes their R2 objects", async () => {
@@ -429,6 +434,38 @@ test("batch-failing at least three rows emits an error-level mass_delivery_failu
     "SELECT COUNT(*) AS n FROM bazaardb_delivery WHERE delivery_state = 'failed'",
   );
   expect(failedCount?.n).toBe(3);
+});
+
+test("409 peek_outstanding re-presigns the leased batch and does not burn an attempt", async () => {
+  await seedDelivery("snap-out-a", "2026-06-03T00:00:01.000Z");
+  await seedDelivery("snap-out-b", "2026-06-03T00:00:02.000Z");
+
+  const first = await peek();
+  const firstBody = (await first.json()) as {
+    peek_id: string;
+    items: Array<{ snapshot_id: string }>;
+  };
+  expect(firstBody.items.map((i) => i.snapshot_id)).toEqual(["snap-out-a", "snap-out-b"]);
+
+  // Partner "lost" firstBody and re-peeks while the lease is still held.
+  const recovery = await peek();
+  expect(recovery.status).toBe(409);
+  const recoveryBody = (await recovery.json()) as {
+    status: string;
+    peek_id: string;
+    lease_expires_at_utc: string;
+    items: Array<{ snapshot_id: string; download_url: string }>;
+  };
+  expect(recoveryBody.status).toBe("peek_outstanding");
+  expect(recoveryBody.peek_id).toBe(firstBody.peek_id);
+  expect(recoveryBody.items.map((i) => i.snapshot_id)).toEqual(["snap-out-a", "snap-out-b"]);
+  expect(recoveryBody.items.every((i) => typeof i.download_url === "string" && i.download_url.length > 0)).toBe(true);
+
+  // Re-fetch must NOT consume a delivery attempt (still 1 from the first peek).
+  const attempts = await env.DB.prepare(
+    "SELECT delivery_attempts FROM bazaardb_delivery ORDER BY snapshot_id",
+  ).all<{ delivery_attempts: number }>();
+  expect(attempts.results.map((r) => r.delivery_attempts)).toEqual([1, 1]);
 });
 
 test("max-attempt pending rows fail terminally and leave their R2 objects for lifecycle cleanup", async () => {

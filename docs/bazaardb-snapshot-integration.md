@@ -107,11 +107,16 @@ At most one peek batch may be outstanding at a time. If a previous batch is stil
 {
   "status": "peek_outstanding",
   "peek_id": "pk_...",
-  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z"
+  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z",
+  "items": [
+    { "snapshot_id": "string", "download_url": "https://<account>.r2.cloudflarestorage.com/..." }
+  ]
 }
 ```
 
-To resolve a `409`, either confirm (fully or partially) the outstanding peek, or wait for its lease to expire. When a lease expires, unconfirmed snapshots return to the pending queue, provided they remain under the delivery-attempt cap described below.
+The `items` array has the same `{ snapshot_id, download_url }` shape as the 200 response. A job that lost its original peek response can use this to re-download and confirm the outstanding batch immediately, without waiting for the lease to expire. The re-fetch does not consume a delivery attempt and does not extend the lease.
+
+To resolve a `409`, use the returned `items` to re-download the outstanding batch and confirm, or wait for the lease to expire. When a lease expires, unconfirmed snapshots return to the pending queue, provided they remain under the delivery-attempt cap described below.
 
 #### Delivery attempts and the confirm deadline
 

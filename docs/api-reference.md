@@ -524,9 +524,14 @@ The JSON body is parsed only when the `Content-Type` media type is `application/
 {
   "status": "peek_outstanding",
   "peek_id": "pk_...",
-  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z"
+  "lease_expires_at_utc": "2026-06-03T12:40:00.000Z",
+  "items": [
+    { "snapshot_id": "string", "download_url": "https://<account>.r2.cloudflarestorage.com/..." }
+  ]
 }
 ```
+
+The 409 now re-presigns and returns the still-unconfirmed items held by the outstanding lease, so a client that lost its original `download_url`s can recover the batch without waiting for the lease to expire. `download_url` is a fresh 10-minute SigV4 URL. The re-fetch does not consume a delivery attempt and does not extend the lease.
 
 Call `confirm` for successfully ingested DTOs or wait for the lease to expire. A pending row can be claimed at most 3 times; after that, the next `peek` marks it `failed` with `failure_reason='max_delivery_attempts'`. `failed` is a terminal accepted-loss state: the row is never re-queued or re-delivered, and its R2 object is not deleted immediately — cleanup of failed objects is owned by the bucket's R2 lifecycle rule. Re-uploading the same `snapshot_id` later still returns 200 without reviving the row, even if the lifecycle rule has already removed the object.
 

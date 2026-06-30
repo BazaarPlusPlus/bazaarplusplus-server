@@ -1,4 +1,4 @@
-import { createR2Presigner } from "../../crypto/presign";
+import { createR2Presigner, type R2Presigner } from "../../crypto/presign";
 import type { Env } from "../../env";
 import { requireBearer } from "../../http/auth";
 import { json, readOptionalJsonObject } from "../../http/json";
@@ -72,6 +72,25 @@ async function findOutstandingLease(
     .first<OutstandingLeaseRow>();
 }
 
+function sortByUploaded(rows: ClaimedDeliveryRow[]): ClaimedDeliveryRow[] {
+  return [...rows].sort((a, b) => {
+    const uploaded = a.uploaded_at_utc.localeCompare(b.uploaded_at_utc);
+    return uploaded === 0 ? a.snapshot_id.localeCompare(b.snapshot_id) : uploaded;
+  });
+}
+
+async function presignItems(
+  presigner: R2Presigner,
+  rows: ClaimedDeliveryRow[],
+): Promise<Array<{ snapshot_id: string; download_url: string }>> {
+  return Promise.all(
+    sortByUploaded(rows).map(async (row) => {
+      const signed = await presigner.sign(row.r2_key, LeaseSeconds);
+      return { snapshot_id: row.snapshot_id, download_url: signed.url };
+    }),
+  );
+}
+
 export async function handlePeekBazaarDbSnapshots(
   request: Request,
   env: Env,
@@ -127,11 +146,23 @@ export async function handlePeekBazaarDbSnapshots(
   if (claim.results.length === 0) {
     const outstanding = await findOutstandingLease(env, nowUtc);
     if (outstanding) {
+      const leased = await env.DB.prepare(
+        `
+          SELECT snapshot_id, r2_key, uploaded_at_utc
+          FROM bazaardb_delivery
+          WHERE lease_peek_id = ?
+            AND delivery_state = 'pending'
+        `,
+      )
+        .bind(outstanding.lease_peek_id)
+        .all<ClaimedDeliveryRow>();
+
       return json(
         {
           status: "peek_outstanding",
           peek_id: outstanding.lease_peek_id,
           lease_expires_at_utc: outstanding.lease_until_utc,
+          items: await presignItems(presigner, leased.results),
         },
         { status: 409 },
       );
@@ -139,17 +170,7 @@ export async function handlePeekBazaarDbSnapshots(
     return json({ peek_id: null, items: [] });
   }
 
-  const claimedRows = [...claim.results].sort((a, b) => {
-    const uploaded = a.uploaded_at_utc.localeCompare(b.uploaded_at_utc);
-    return uploaded === 0 ? a.snapshot_id.localeCompare(b.snapshot_id) : uploaded;
-  });
-  const items = await Promise.all(claimedRows.map(async (row) => {
-    const signed = await presigner.sign(row.r2_key, LeaseSeconds);
-    return {
-      snapshot_id: row.snapshot_id,
-      download_url: signed.url,
-    };
-  }));
+  const items = await presignItems(presigner, claim.results);
 
   logInfo("bazaardb.peek", {
     peek_id: peekId,
