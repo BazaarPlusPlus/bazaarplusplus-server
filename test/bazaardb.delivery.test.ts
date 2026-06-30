@@ -557,7 +557,7 @@ test("409 peek_outstanding head-filters the leased batch and fails an in-lease-d
   ]);
 });
 
-test("mass object_gone in the 409 recovery path raises an error-level mass_delivery_failure", async () => {
+test("mass object_gone on the claim path raises an error-level mass_delivery_failure", async () => {
   await seedDelivery("snap-mg-a", "2026-06-03T00:00:01.000Z", { putObject: false });
   await seedDelivery("snap-mg-b", "2026-06-03T00:00:02.000Z", { putObject: false });
   await seedDelivery("snap-mg-c", "2026-06-03T00:00:03.000Z", { putObject: false });
