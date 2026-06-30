@@ -1,0 +1,21 @@
+test/bazaardb.delivery.test.ts
+  s_13bbfac281f407::t_3528e9ce8bda01 560
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4a4e0cb8d6e7c88ddf95110d18748eda3dcfe00a",
+  "prompts": {},
+  "sessions": {
+    "s_13bbfac281f407": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "07424926-4ac6-4d7b-867d-d11a8c1e44d0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Xinyu YANG <cauyxy@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
