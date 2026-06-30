@@ -126,11 +126,20 @@ async function failGoneRows(
   )
     .bind(nowUtc, nowUtc, peekId, ...gone.map((row) => row.snapshot_id))
     .run();
-  logWarn("bazaardb.peek", {
-    peek_id: peekId,
-    gone_count: gone.length,
-    outcome: "object_gone_failed",
-  });
+  if (gone.length >= MassDeliveryFailureThreshold) {
+    logError("bazaardb.peek", {
+      peek_id: peekId,
+      gone_count: gone.length,
+      outcome: "mass_delivery_failure",
+      failure_reason: "object_gone",
+    });
+  } else {
+    logWarn("bazaardb.peek", {
+      peek_id: peekId,
+      gone_count: gone.length,
+      outcome: "object_gone_failed",
+    });
+  }
 }
 
 export async function handlePeekBazaarDbSnapshots(
@@ -199,12 +208,15 @@ export async function handlePeekBazaarDbSnapshots(
         .bind(outstanding.lease_peek_id)
         .all<ClaimedDeliveryRow>();
 
+      const { live, gone } = await splitByObjectPresence(env, leased.results);
+      await failGoneRows(env, outstanding.lease_peek_id, gone, nowUtc);
+
       return json(
         {
           status: "peek_outstanding",
           peek_id: outstanding.lease_peek_id,
           lease_expires_at_utc: outstanding.lease_until_utc,
-          items: await presignItems(presigner, leased.results),
+          items: await presignItems(presigner, live),
         },
         { status: 409 },
       );

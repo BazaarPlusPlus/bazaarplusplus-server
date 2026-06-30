@@ -535,6 +535,8 @@ Snapshots whose R2 object has already been removed by the bucket lifecycle rule 
 
 The 409 now re-presigns and returns the still-unconfirmed items held by the outstanding lease, so a client that lost its original `download_url`s can recover the batch without waiting for the lease to expire. `download_url` is a fresh 10-minute SigV4 URL. The re-fetch does not consume a delivery attempt and does not extend the lease.
 
+The 409 recovery path applies the same R2 existence check as the claim path: any leased snapshot whose object was removed by the bucket lifecycle rule mid-lease is excluded from `items` and marked `failed` with `failure_reason='object_gone'`, same as in the 200 response above. If every leased row has gone missing, `items` is `[]` (the lease itself still exists; the next `peek` proceeds normally once it expires).
+
 Call `confirm` for successfully ingested DTOs or wait for the lease to expire. A pending row can be claimed at most 3 times; after that, the next `peek` marks it `failed` with `failure_reason='max_delivery_attempts'`. `failed` is a terminal accepted-loss state: the row is never re-queued or re-delivered, and its R2 object is not deleted immediately — cleanup of failed objects is owned by the bucket's R2 lifecycle rule. Re-uploading the same `snapshot_id` later still returns 200 without reviving the row, even if the lifecycle rule has already removed the object.
 
 ### Errors

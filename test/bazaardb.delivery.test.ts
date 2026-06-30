@@ -505,6 +505,91 @@ test("peek returns an empty batch (peek_id null) when every claimed object is go
   expect(await next.json()).toEqual({ peek_id: null, items: [] });
 });
 
+test("409 peek_outstanding head-filters the leased batch and fails an in-lease-deleted object", async () => {
+  await seedDelivery("snap-a", "2026-06-03T00:00:01.000Z");
+  const snapBKey = await seedDelivery("snap-b", "2026-06-03T00:00:02.000Z");
+
+  const first = await peek();
+  const firstBody = (await first.json()) as {
+    peek_id: string;
+    items: Array<{ snapshot_id: string }>;
+  };
+  expect(firstBody.items.map((i) => i.snapshot_id)).toEqual(["snap-a", "snap-b"]);
+
+  // R2 lifecycle deletes snap-b's object DURING the lease.
+  await env.BAZAARDB_BUCKET.delete(snapBKey);
+
+  const recovery = await peek();
+  expect(recovery.status).toBe(409);
+  const recoveryBody = (await recovery.json()) as {
+    status: string;
+    peek_id: string;
+    items: Array<{ snapshot_id: string; download_url: string }>;
+  };
+  expect(recoveryBody.status).toBe("peek_outstanding");
+  expect(recoveryBody.peek_id).toBe(firstBody.peek_id);
+  expect(recoveryBody.items.map((i) => i.snapshot_id)).toEqual(["snap-a"]);
+
+  const rows = await env.DB.prepare(
+    "SELECT snapshot_id, delivery_state, failure_reason, failed_at_utc, lease_peek_id FROM bazaardb_delivery ORDER BY snapshot_id",
+  ).all<{
+    snapshot_id: string;
+    delivery_state: string;
+    failure_reason: string | null;
+    failed_at_utc: string | null;
+    lease_peek_id: string | null;
+  }>();
+  expect(rows.results).toEqual([
+    {
+      snapshot_id: "snap-a",
+      delivery_state: "pending",
+      failure_reason: null,
+      failed_at_utc: null,
+      lease_peek_id: firstBody.peek_id,
+    },
+    {
+      snapshot_id: "snap-b",
+      delivery_state: "failed",
+      failure_reason: "object_gone",
+      failed_at_utc: expect.stringMatching(/Z$/),
+      lease_peek_id: null,
+    },
+  ]);
+});
+
+test("mass object_gone in the 409 recovery path raises an error-level mass_delivery_failure", async () => {
+  await seedDelivery("snap-mg-a", "2026-06-03T00:00:01.000Z", { putObject: false });
+  await seedDelivery("snap-mg-b", "2026-06-03T00:00:02.000Z", { putObject: false });
+  await seedDelivery("snap-mg-c", "2026-06-03T00:00:03.000Z", { putObject: false });
+
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const response = await peek();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ peek_id: null, items: [] });
+
+    const massFailureEvents = errorSpy.mock.calls
+      .map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+      .filter((entry) => entry.event === "bazaardb.peek");
+    expect(massFailureEvents).toEqual([
+      expect.objectContaining({
+        level: "error",
+        outcome: "mass_delivery_failure",
+        failure_reason: "object_gone",
+        gone_count: 3,
+      }),
+    ]);
+  } finally {
+    errorSpy.mockRestore();
+  }
+
+  const failed = await selectFirst<{ n: number }>(
+    env.DB,
+    "SELECT COUNT(*) AS n FROM bazaardb_delivery WHERE delivery_state = 'failed' AND failure_reason = 'object_gone'",
+  );
+  expect(failed?.n).toBe(3);
+});
+
 test("max-attempt pending rows fail terminally and leave their R2 objects for lifecycle cleanup", async () => {
   const failedKey = await seedDelivery("snap-poison", "2026-06-03T00:00:01.000Z", {
     attempts: 3,

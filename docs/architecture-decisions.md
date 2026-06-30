@@ -54,7 +54,9 @@ NULL opponents are dropped (SQL three-valued logic naturally excludes them).
 
 Delivery is at-least-once within at most 3 peek claims. After 3 claims without confirm, a snapshot is marked `failed` — terminal state, never re-queued. The R2 object is not deleted immediately on failure; cleanup is deferred to the bucket lifecycle rule.
 
-`peek` `head()`s each claimed object before presigning. A row whose R2 object is already lifecycle-deleted is marked `failed` with `failure_reason='object_gone'` (distinct from `max_delivery_attempts`) and excluded from the batch, rather than served as a dead presigned URL.
+`peek` `head()`s each claimed object before presigning. A row whose R2 object is already lifecycle-deleted is marked `failed` with `failure_reason='object_gone'` (distinct from `max_delivery_attempts`) and excluded from the batch, rather than served as a dead presigned URL. This `head()`-and-fail check is enforced on both the claim path and the 409 `peek_outstanding` recovery path: a retrying caller re-fetching an outstanding lease's items gets the same existence check as the original claim, so it cannot be handed a download URL for an object the lifecycle rule deleted mid-lease.
+
+A burst of `object_gone` failures in one peek (>= `MassDeliveryFailureThreshold`, currently 3) raises the same `outcome: "mass_delivery_failure"` error-level alarm as exhausting `max_delivery_attempts` on a burning queue — `failure_reason: "object_gone"` discriminates a retention-floor breach (see the Data Retention invariant above) from a token-mismatch burn. Single-row `object_gone` failures stay a `logWarn`.
 
 Re-uploading the same `snapshot_id` is a no-op once any row exists (regardless of state). The server does not revive failed rows.
 
