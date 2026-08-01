@@ -124,6 +124,8 @@ Battle projection ingest is opponent-filtered. `seen_player_accounts` is the set
 
 `run_id` is immutable. Re-uploading the same `run_id` with the same artifact hash returns the existing `object_key` and does not refresh `runs` or `battles` projections. Re-uploading the same `run_id` with a different artifact hash returns 409 `run_bundle_conflict`.
 
+**Ingest sampling.** The server may keep only a percentage of run bundles (`RUN_BUNDLE_KEEP_PERCENT`, default 100). A sampled-out upload still answers 200 `accepted` with a well-formed `object_key`, but no artifact is written and no `runs`, `battles`, or `seen_player_accounts` row is created; a later `download-link` or `replay-link` for it resolves to 404 the same way an unknown run does. The verdict is deterministic on `run_id`, so retrying a sampled-out upload cannot push it through. Clients must not treat a 200 as proof the run is retrievable.
+
 ### Errors
 
 | Status | `error` code | Condition |

@@ -16,6 +16,7 @@ declare namespace Cloudflare {
     R2_ACCESS_KEY_ID: string;
     R2_SECRET_ACCESS_KEY: string;
     BAZAARDB_PULL_TOKEN: string;
+    RUN_BUNDLE_KEEP_PERCENT: string;
     TEST_MIGRATIONS: import("@cloudflare/vitest-pool-workers").D1Migration[];
   }
 }

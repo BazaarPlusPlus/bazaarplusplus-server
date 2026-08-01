@@ -26,6 +26,10 @@ export default defineConfig({
           R2_ACCESS_KEY_ID: "test-access-key-id",
           R2_SECRET_ACCESS_KEY: "test-secret-access-key",
           BAZAARDB_PULL_TOKEN: "test-pull-token",
+          // Pin ingest sampling off so the suite is independent of whatever
+          // rate wrangler.toml is temporarily deployed with. Sampling behavior
+          // is covered by runBundles.sampling.test.ts with per-call overrides.
+          RUN_BUNDLE_KEEP_PERCENT: "100",
         },
         isolatedStorage: true,
       },
