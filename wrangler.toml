@@ -17,6 +17,9 @@ head_sampling_rate = 1.0
 [vars]
 RUN_BUNDLE_BUCKET_NAME = "bazaarplusplus-run-bundles-v4"
 BAZAARDB_BUCKET_NAME = "bazaarplusplus-bazaardb-snapshots-v4"
+# Temporary run-bundle ingest sampling. Set back to "100" (or delete the line)
+# to ingest everything again.
+RUN_BUNDLE_KEEP_PERCENT = "50"
 
 [[routes]]
 pattern = "mod-api-v4.bazaarplusplus.com"

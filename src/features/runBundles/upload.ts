@@ -119,6 +119,36 @@ const BATTLE_INSERT_SQL = `
     updated_at_utc = excluded.updated_at_utc
 `;
 
+/**
+ * Percent of run bundles this deployment keeps (0-100).
+ *
+ * Temporary ingest load valve, driven by the `RUN_BUNDLE_KEEP_PERCENT` var so
+ * the rate can be changed or removed without a code change. Anything missing or
+ * unparseable keeps everything, so a misconfigured var never silently drops data.
+ */
+function runBundleKeepPercent(env: Env): number {
+  const parsed = Number(env.RUN_BUNDLE_KEEP_PERCENT);
+  return Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : 100;
+}
+
+/**
+ * Stable 0-99 bucket for a `run_id` (32-bit FNV-1a).
+ *
+ * Sampling is deterministic on `run_id` rather than random per request: a
+ * `Math.random()` gate would let a retrying client eventually push any run
+ * through, making the effective keep rate a function of client retry behavior.
+ * Keying on `run_id` (not `player_account_id`) also keeps every uploader landing
+ * in `seen_player_accounts`, so opponent-filtered battle projection still works.
+ */
+function runIdBucket(runId: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < runId.length; index += 1) {
+    hash ^= runId.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) % 100;
+}
+
 async function findExistingRun(env: Env, runId: string): Promise<ExistingRunRow | null> {
   return env.DB.prepare(
     `
@@ -338,6 +368,25 @@ export async function handleUploadRunBundle(
   if (runId == null) {
     return rejectInvalidRunBundle("missing_run_id");
   }
+
+  // Sampled-out uploads answer with the normal accepted envelope: a 4xx/5xx here
+  // would just turn into client retries, which neither sheds load nor holds the
+  // keep rate. The artifact is never written, so `object_key` names an object
+  // that does not exist — the same as any run this server never ingested.
+  const keepPercent = runBundleKeepPercent(env);
+  if (runIdBucket(runId) >= keepPercent) {
+    logInfo("run_bundles.upload", {
+      run_id: runId,
+      keep_percent: keepPercent,
+      outcome: "sampled_out",
+    });
+    return json({
+      status: "accepted",
+      run_id: runId,
+      object_key: `run-bundles/${crypto.randomUUID()}.mpack.gz`,
+    });
+  }
+
   const status = optionalTrimmedString(runProjectionRaw.status) ?? "completed";
   const artifactCodec = optionalTrimmedString(rawBody.artifact_codec)
     ?? RunBundleArtifactContentType;
