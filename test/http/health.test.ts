@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import worker from "../src/index";
+import worker from "../../src/index";
 
 test("GET /health reports V5 liveness without dependency access", async () => {
   const response = await worker.fetch(

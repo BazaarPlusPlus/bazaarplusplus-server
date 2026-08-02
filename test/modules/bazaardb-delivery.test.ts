@@ -1,13 +1,16 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import worker from "../src/index";
-import { CLAIM_LEASE_MS, DELIVERY_RETRY_BACKOFF_MS } from "../src/limits";
-import { claimDeliveries, settleDeliveries } from "../src/modules/bazaardb-delivery";
-import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
-import { FakeClock } from "./fixtures/clock";
-import { createTestDeps } from "./fixtures/deps";
-import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
+import worker from "../../src/index";
+import { CLAIM_LEASE_MS, DELIVERY_RETRY_BACKOFF_MS } from "../../src/limits";
+import { claimDeliveries, settleDeliveries } from "../../src/modules/bazaardb-delivery";
+import { makeBundleFixture, uploadRequest } from "../fixtures/bundle";
+import { FakeClock } from "../fixtures/clock";
+import { createTestDeps } from "../fixtures/deps";
+import {
+  RecordingBundleDownloadSigner,
+  RejectingBundleDownloadSigner,
+} from "../fixtures/presigner";
 
 const DELIVERY_TOKEN = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 

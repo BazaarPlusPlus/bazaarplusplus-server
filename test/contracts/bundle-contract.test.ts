@@ -1,8 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import worker from "../src/index";
-import { contentDigest, makeBundleFixture, sealBundle, uploadRequest } from "./fixtures/bundle";
+import worker from "../../src/index";
+import { contentDigest, makeBundleFixture, sealBundle, uploadRequest } from "../fixtures/bundle";
 
 const DEFAULT_RUN = new Uint8Array([0x1f, 0x8b, 0x08, 0, 5, 4, 3, 2, 1]);
 

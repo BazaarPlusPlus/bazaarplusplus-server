@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { Env } from "../src/env";
-import { HttpError } from "../src/errors";
-import type { HandlerDeps } from "../src/http/deps";
+import type { Env } from "../../src/env";
+import { HttpError } from "../../src/errors";
+import type { HandlerDeps } from "../../src/http/deps";
 import {
   createFetchHandler,
   type RouteDefinition,
   type RouteHandler,
-} from "../src/http/route-shell";
+} from "../../src/http/route-shell";
 
 const SYNC_TOKEN = "s".repeat(43);
 const DELIVERY_TOKEN = "d".repeat(43);

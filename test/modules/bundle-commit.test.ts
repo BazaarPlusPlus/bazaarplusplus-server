@@ -5,8 +5,8 @@ import {
   type CommitObserver,
   commitBundle,
   inspectExistingBundle,
-} from "../src/modules/bundle-commit";
-import { bundleData } from "./fixtures/bundle";
+} from "../../src/modules/bundle-commit";
+import { bundleData } from "../fixtures/bundle";
 
 const TIMES = { availableAtMs: 1_785_628_900_000, storedAtMs: 1_785_628_899_000 };
 

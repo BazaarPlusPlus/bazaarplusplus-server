@@ -1,11 +1,11 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import worker from "../src/index";
-import { collectBundles } from "../src/modules/bundle-collection";
-import { FakeClock } from "./fixtures/clock";
-import { createTestDeps } from "./fixtures/deps";
-import { RecordingBundleDownloadSigner } from "./fixtures/presigner";
+import worker from "../../src/index";
+import { collectBundles } from "../../src/modules/bundle-collection";
+import { FakeClock } from "../fixtures/clock";
+import { createTestDeps } from "../fixtures/deps";
+import { RecordingBundleDownloadSigner } from "../fixtures/presigner";
 
 const SYNC_TOKEN = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 

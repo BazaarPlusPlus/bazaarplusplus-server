@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import checksumsJson from "../contracts/v5/fixtures/checksums.json?raw";
-import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import runOnlyBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
-import { decodeBase64, sha256Hex } from "./fixtures/bundle";
+import checksumsJson from "../../contracts/v5/fixtures/checksums.json?raw";
+import corruptMagicBase64 from "../../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
+import runOnlyBase64 from "../../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
+import { decodeBase64, sha256Hex } from "../fixtures/bundle";
 
 interface FixtureChecksums {
   "run-only.bundle.b64": {

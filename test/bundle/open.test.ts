@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import checksumsJson from "../contracts/v5/fixtures/checksums.json?raw";
-import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import runOnlyBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
-import { openBundle } from "../src/bundle/open";
-import { decodeBase64, stream } from "./fixtures/bundle";
+import checksumsJson from "../../contracts/v5/fixtures/checksums.json?raw";
+import corruptMagicBase64 from "../../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
+import runOnlyBase64 from "../../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
+import { openBundle } from "../../src/bundle/open";
+import { decodeBase64, stream } from "../fixtures/bundle";
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(

@@ -1,8 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import worker from "../src/index";
-import { contentDigest, makeBundleFixture, uploadRequest } from "./fixtures/bundle";
+import worker from "../../src/index";
+import { contentDigest, makeBundleFixture, uploadRequest } from "../fixtures/bundle";
 
 describe("POST /bundles", () => {
   test("stores one Run-only Bundle and returns its receipt", async () => {

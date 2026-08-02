@@ -1,8 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 
-import worker from "../src/index";
-import { contentDigest, makeBundleFixture, uploadRequest } from "./fixtures/bundle";
+import worker from "../../src/index";
+import { contentDigest, makeBundleFixture, uploadRequest } from "../fixtures/bundle";
 
 describe("Bundle ingest fault recovery", () => {
   test("keeps an R2-only object after D1 failure and recovers it on retry", async () => {

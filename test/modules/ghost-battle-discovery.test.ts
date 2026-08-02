@@ -1,12 +1,15 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import worker from "../src/index";
-import { discoverGhostBattles } from "../src/modules/ghost-battle-discovery";
-import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
-import { FakeClock } from "./fixtures/clock";
-import { createTestDeps } from "./fixtures/deps";
-import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
+import worker from "../../src/index";
+import { discoverGhostBattles } from "../../src/modules/ghost-battle-discovery";
+import { makeBundleFixture, uploadRequest } from "../fixtures/bundle";
+import { FakeClock } from "../fixtures/clock";
+import { createTestDeps } from "../fixtures/deps";
+import {
+  RecordingBundleDownloadSigner,
+  RejectingBundleDownloadSigner,
+} from "../fixtures/presigner";
 
 describe("GET /ghost-battles", () => {
   test("uses one injected signing time and deduplicates a shared Bundle key", async () => {

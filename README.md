@@ -34,6 +34,8 @@ Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations an
 `src/bundle/open.ts` owns Bundle opening and streaming validation.
 `src/modules/bundle-commit.ts` owns Bundle persistence decisions and the atomic D1 commit.
 
+`test/` mirrors the `src/` layout (`http/`, `bundle/`, `modules/`), with contract golden-vector tests in `test/contracts/` and migration, schema, and root-module tests at the top level.
+
 ## Production configuration
 
 `src/env.ts` is the sole binding declaration. Wrangler provides:

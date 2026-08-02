@@ -1,11 +1,11 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import validBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
-import worker from "../src/index";
-import { contentDigest, decodeBase64, uploadRequest } from "./fixtures/bundle";
+import corruptMagicBase64 from "../../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
+import validBase64 from "../../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
+import worker from "../../src/index";
+import { contentDigest, decodeBase64, uploadRequest } from "../fixtures/bundle";
 
 async function headers(bytes: Uint8Array): Promise<Headers> {
   return new Headers({
