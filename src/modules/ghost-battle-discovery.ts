@@ -1,13 +1,10 @@
-import { validAccountId } from "../bundle/manifest";
 import { toHex } from "../bundle/hex";
-import {
-  GHOST_DEFAULT_LIMIT,
-  GHOST_LOOKBACK_MS,
-  GHOST_MAX_LIMIT,
-} from "../limits";
+import { validAccountId } from "../bundle/manifest";
 import type { Env } from "../env";
-import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../errors";
+import type { HandlerDeps } from "../http/deps";
+import { oneQueryValue } from "../http/request";
+import { GHOST_DEFAULT_LIMIT, GHOST_LOOKBACK_MS, GHOST_MAX_LIMIT } from "../limits";
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
@@ -18,16 +15,6 @@ interface GhostRow {
   is_final_battle: number;
   projection_json: string;
   object_key: string;
-}
-
-function oneValue(params: URLSearchParams, name: string, required: boolean): string | null {
-  const values = params.getAll(name);
-  if (values.length > 1 || (required && values.length === 0)) {
-    throw new HttpError(400, "invalid_query", `${name} must appear exactly once`, false, {
-      field: name,
-    });
-  }
-  return values[0] ?? null;
 }
 
 async function accountHash(accountId: string): Promise<string> {
@@ -71,13 +58,13 @@ export async function discoverGhostBattles(
       });
     }
   }
-  const accountId = oneValue(url.searchParams, "player_account_id", true);
+  const accountId = oneQueryValue(url.searchParams, "player_account_id", true);
   if (accountId === null || !validAccountId(accountId)) {
     throw new HttpError(400, "invalid_query", "player_account_id is invalid", false, {
       field: "player_account_id",
     });
   }
-  const limitValue = oneValue(url.searchParams, "limit", false);
+  const limitValue = oneQueryValue(url.searchParams, "limit", false);
   let limit = GHOST_DEFAULT_LIMIT;
   if (limitValue !== null) {
     if (!/^[1-9][0-9]*$/.test(limitValue)) {
@@ -118,35 +105,29 @@ export async function discoverGhostBattles(
     throw new HttpError(503, "storage_unavailable", "Ghost Battle query failed", true);
   }
 
-  const signer = deps.signer;
-  try {
-    const downloads = await signDownloadPage(
-      signer,
-      rows.map((row) => row.object_key),
-      issuedAt,
-      "Ghost Battle URL signing failed",
-    );
-    const battles = rows.map((row, index) => {
-      const projection = JSON.parse(row.projection_json) as Record<string, unknown>;
-      return {
-        ...projection,
-        battle_id: row.battle_id,
-        bundle_id: row.bundle_id,
-        recorded_at_ms: row.recorded_at_ms,
-        is_final_battle: row.is_final_battle === 1,
-        download_url: downloads[index].url,
-        download_expires_at_ms: downloads[index].expiresAtMs,
-      };
-    });
-    logEvent("ghost.discovery", {
-      request_id: requestId,
-      account_hash: await accountHash(accountId),
-      row_count: rows.length,
-      limited: false,
-    });
-    return { battles };
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(503, "storage_unavailable", "Ghost Battle URL signing failed", true);
-  }
+  const downloads = await signDownloadPage(
+    deps.signer,
+    rows.map((row) => row.object_key),
+    issuedAt,
+    "Ghost Battle URL signing failed",
+  );
+  const battles = rows.map((row, index) => {
+    const projection = JSON.parse(row.projection_json) as Record<string, unknown>;
+    return {
+      ...projection,
+      battle_id: row.battle_id,
+      bundle_id: row.bundle_id,
+      recorded_at_ms: row.recorded_at_ms,
+      is_final_battle: row.is_final_battle === 1,
+      download_url: downloads[index].url,
+      download_expires_at_ms: downloads[index].expiresAtMs,
+    };
+  });
+  logEvent("ghost.discovery", {
+    request_id: requestId,
+    account_hash: await accountHash(accountId),
+    row_count: rows.length,
+    limited: false,
+  });
+  return { battles };
 }

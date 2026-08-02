@@ -1,8 +1,5 @@
 import type { Env } from "../env";
-import {
-  createBundleDownloadSigner,
-  type BundleDownloadSigner,
-} from "../presigner";
+import { type BundleDownloadSigner, createBundleDownloadSigner } from "../presigner";
 
 export interface HandlerDeps {
   readonly signer: BundleDownloadSigner;
@@ -13,7 +10,8 @@ export function createHandlerDeps(env: Env): HandlerDeps {
   let cached: BundleDownloadSigner | undefined;
   return {
     get signer() {
-      return (cached ??= createBundleDownloadSigner(env));
+      cached ??= createBundleDownloadSigner(env);
+      return cached;
     },
     now: () => Date.now(),
   };

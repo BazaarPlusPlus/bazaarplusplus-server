@@ -3,8 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json && biome check .",
+    "lint": "biome check .",
+    "format": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "wrangler dev",
@@ -14,6 +19,7 @@
     "aws4fetch": "^1.0.20"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.6",
     "@cloudflare/vitest-pool-workers": "0.20.1",
     "@cloudflare/workers-types": "5.20260801.1",
     "@types/node": "^25.5.0",

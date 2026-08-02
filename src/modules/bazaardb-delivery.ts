@@ -1,4 +1,8 @@
 import { validBundleId } from "../bundle/manifest";
+import type { Env } from "../env";
+import { HttpError } from "../errors";
+import type { HandlerDeps } from "../http/deps";
+import { readJsonObject } from "../http/request";
 import {
   CLAIM_DEFAULT_LIMIT,
   CLAIM_LEASE_MS,
@@ -8,10 +12,6 @@ import {
   R2_RETENTION_MS,
   SETTLE_MAX_RESULTS,
 } from "../limits";
-import type { Env } from "../env";
-import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../errors";
-import { readJsonObject } from "../http/request";
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
@@ -51,7 +51,11 @@ interface SettleItemPair {
 
 function claimLimit(value: unknown): number {
   if (value === undefined) return CLAIM_DEFAULT_LIMIT;
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > CLAIM_MAX_LIMIT) {
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > CLAIM_MAX_LIMIT
+  ) {
     throw new HttpError(400, "invalid_limit", "limit must be an integer between 1 and 50", false);
   }
   return value as number;
@@ -246,10 +250,17 @@ export async function claimDeliveries(
 }
 
 function parseSettle(body: Record<string, unknown>): { claimId: string; results: SettleInput[] } {
-  if (typeof body.claim_id !== "string" || !/^clm_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.claim_id)) {
+  if (
+    typeof body.claim_id !== "string" ||
+    !/^clm_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.claim_id)
+  ) {
     throw new HttpError(400, "invalid_settle_request", "claim_id is invalid", false);
   }
-  if (!Array.isArray(body.results) || body.results.length < 1 || body.results.length > SETTLE_MAX_RESULTS) {
+  if (
+    !Array.isArray(body.results) ||
+    body.results.length < 1 ||
+    body.results.length > SETTLE_MAX_RESULTS
+  ) {
     throw new HttpError(400, "invalid_settle_request", "results must contain 1 to 50 items", false);
   }
   const bundleIds = new Set<string>();
@@ -262,7 +273,12 @@ function parseSettle(body: Record<string, unknown>): { claimId: string; results:
       throw new HttpError(400, "invalid_settle_request", "Settle bundle_id is invalid", false);
     }
     if (bundleIds.has(source.bundle_id)) {
-      throw new HttpError(400, "invalid_settle_request", "Settle bundle_id values must be unique", false);
+      throw new HttpError(
+        400,
+        "invalid_settle_request",
+        "Settle bundle_id values must be unique",
+        false,
+      );
     }
     bundleIds.add(source.bundle_id);
     if (
@@ -275,7 +291,12 @@ function parseSettle(body: Record<string, unknown>): { claimId: string; results:
     const reason = source.reason;
     if (source.outcome === "accepted") {
       if (reason !== undefined) {
-        throw new HttpError(400, "invalid_settle_request", "accepted must not include reason", false);
+        throw new HttpError(
+          400,
+          "invalid_settle_request",
+          "accepted must not include reason",
+          false,
+        );
       }
       return { bundleId: source.bundle_id, outcome: source.outcome, reason: null };
     }
@@ -408,15 +429,18 @@ export async function settleDeliveries(
       ).bind(input.claimId, result.bundleId),
     );
     const found = await env.DB.batch<ReceiptRow>(queries);
-    receipts = found.map((result) => (result.results?.[0] as ReceiptRow | undefined) ?? {
-      claim_id: null,
-      bundle_id: null,
-      outcome: null,
-      reason: null,
-      delivery_state: null,
-      active_claim_id: null,
-      claimable_at_ms: null,
-    });
+    receipts = found.map(
+      (result) =>
+        (result.results?.[0] as ReceiptRow | undefined) ?? {
+          claim_id: null,
+          bundle_id: null,
+          outcome: null,
+          reason: null,
+          delivery_state: null,
+          active_claim_id: null,
+          claimable_at_ms: null,
+        },
+    );
   } catch {
     throw new HttpError(503, "storage_unavailable", "BazaarDB settle transaction failed", true);
   }

@@ -1,9 +1,8 @@
 import { AwsClient } from "aws4fetch";
-
-import { PRESIGNED_GET_TTL_SECONDS } from "./limits";
-import type { Env } from "./env";
 import { validObjectKey } from "./bundle/manifest";
+import type { Env } from "./env";
 import { HttpError } from "./errors";
+import { PRESIGNED_GET_TTL_SECONDS } from "./limits";
 
 export interface SignedBundleDownload {
   url: string;

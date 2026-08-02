@@ -1,13 +1,14 @@
 import { validBundleId } from "../bundle/manifest";
+import type { Env } from "../env";
+import { HttpError } from "../errors";
+import type { HandlerDeps } from "../http/deps";
+import { oneQueryValue } from "../http/request";
 import {
   SYNC_DEFAULT_LIMIT,
   SYNC_MAX_LIMIT,
   SYNC_MAX_LOOKBACK_MS,
   SYNC_SETTLE_LAG_MS,
 } from "../limits";
-import type { Env } from "../env";
-import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../errors";
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
@@ -17,27 +18,29 @@ interface CollectionRow {
   object_key: string;
 }
 
-function oneValue(params: URLSearchParams, name: string, required: boolean): string | null {
-  const values = params.getAll(name);
-  if (values.length > 1 || (required && values.length === 0)) {
-    throw new HttpError(400, "invalid_query", `${name} must appear exactly once`, false, {
-      field: name,
-    });
-  }
-  return values[0] ?? null;
-}
-
 function integer(value: string | null, field: string): number {
   if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) {
-    throw new HttpError(400, "invalid_query", `${field} must be a non-negative safe integer`, false, {
-      field,
-    });
+    throw new HttpError(
+      400,
+      "invalid_query",
+      `${field} must be a non-negative safe integer`,
+      false,
+      {
+        field,
+      },
+    );
   }
   const result = Number(value);
   if (!Number.isSafeInteger(result)) {
-    throw new HttpError(400, "invalid_query", `${field} must be a non-negative safe integer`, false, {
-      field,
-    });
+    throw new HttpError(
+      400,
+      "invalid_query",
+      `${field} must be a non-negative safe integer`,
+      false,
+      {
+        field,
+      },
+    );
   }
   return result;
 }
@@ -66,32 +69,41 @@ export async function collectBundles(
 
   const now = deps.now();
   const settlePoint = now - SYNC_SETTLE_LAG_MS;
-  const from = integer(oneValue(url.searchParams, "available_from_ms", true), "available_from_ms");
+  const from = integer(
+    oneQueryValue(url.searchParams, "available_from_ms", true),
+    "available_from_ms",
+  );
   if (from < now - SYNC_MAX_LOOKBACK_MS) {
     throw new HttpError(410, "window_expired", "Bundle window is outside R2 retention", false);
   }
-  const beforeValue = oneValue(url.searchParams, "available_before_ms", false);
+  const beforeValue = oneQueryValue(url.searchParams, "available_before_ms", false);
   const before = beforeValue === null ? settlePoint : integer(beforeValue, "available_before_ms");
   if (before > settlePoint) {
     throw new HttpError(400, "window_not_settled", "Bundle window end is not settled", false);
   }
   if (from >= before) {
-    throw new HttpError(400, "invalid_query", "available_from_ms must be before available_before_ms", false);
+    throw new HttpError(
+      400,
+      "invalid_query",
+      "available_from_ms must be before available_before_ms",
+      false,
+    );
   }
 
-  const limitValue = oneValue(url.searchParams, "limit", false);
+  const limitValue = oneQueryValue(url.searchParams, "limit", false);
   const limit = limitValue === null ? SYNC_DEFAULT_LIMIT : integer(limitValue, "limit");
   if (limit < 1 || limit > SYNC_MAX_LIMIT) {
     throw new HttpError(400, "invalid_query", "limit must be between 1 and 500", false, {
       field: "limit",
     });
   }
-  const afterTimeValue = oneValue(url.searchParams, "after_available_at_ms", false);
-  const afterId = oneValue(url.searchParams, "after_bundle_id", false);
+  const afterTimeValue = oneQueryValue(url.searchParams, "after_available_at_ms", false);
+  const afterId = oneQueryValue(url.searchParams, "after_bundle_id", false);
   if ((afterTimeValue === null) !== (afterId === null)) {
     throw new HttpError(400, "invalid_query", "Both keyset position fields are required", false);
   }
-  const afterTime = afterTimeValue === null ? null : integer(afterTimeValue, "after_available_at_ms");
+  const afterTime =
+    afterTimeValue === null ? null : integer(afterTimeValue, "after_available_at_ms");
   if (
     afterTime !== null &&
     (afterTime < from || afterTime >= before || afterId === null || !validBundleId(afterId))

@@ -1,15 +1,15 @@
-import type { Env } from "../env";
-import { MAX_BUNDLE_BYTES } from "../limits";
-import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../errors";
-import { logError, logEvent } from "../observability";
 import { toHex } from "../bundle/hex";
-import { openBundle, type OpenedBundle } from "../bundle/open";
+import { type OpenedBundle, openBundle } from "../bundle/open";
+import type { Env } from "../env";
+import { HttpError } from "../errors";
+import type { HandlerDeps } from "../http/deps";
+import { MAX_BUNDLE_BYTES } from "../limits";
+import { logError, logEvent } from "../observability";
 import {
-  commitBundle,
-  inspectExistingBundle,
   type BundleReceipt,
   type CommitOutcome,
+  commitBundle,
+  inspectExistingBundle,
 } from "./bundle-commit";
 
 function parseContentDigest(value: string | null): string {
@@ -33,12 +33,7 @@ function parseContentDigest(value: string | null): string {
 
 function parseContentLength(value: string | null): number {
   if (value === null) {
-    throw new HttpError(
-      411,
-      "content_length_required",
-      "Content-Length is required",
-      false,
-    );
+    throw new HttpError(411, "content_length_required", "Content-Length is required", false);
   }
   if (!/^[1-9][0-9]*$/.test(value)) {
     throw new HttpError(400, "invalid_content_length", "Content-Length is invalid", false);
@@ -61,14 +56,24 @@ async function validateExistingObject(
 ): Promise<number> {
   const object = await env.BUNDLE_BUCKET.get(key);
   if (object === null) {
-    throw new HttpError(503, "storage_unavailable", "Conditional R2 conflict object disappeared", true);
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      "Conditional R2 conflict object disappeared",
+      true,
+    );
   }
   try {
     const opened = await openBundle(object.body, object.size, null);
     await opened.body.pipeTo(new WritableStream<Uint8Array>());
     const digest = await opened.digest;
     if (opened.descriptor.bundleId !== incomingBundleId || digest !== incomingDigest) {
-      throw new HttpError(409, "bundle_id_conflict", "Bundle ID already has different bytes", false);
+      throw new HttpError(
+        409,
+        "bundle_id_conflict",
+        "Bundle ID already has different bytes",
+        false,
+      );
     }
     return object.uploaded.getTime();
   } catch (error) {
@@ -150,7 +155,12 @@ export async function ingestBundle(
   deps: HandlerDeps,
 ): Promise<{ status: 200 | 201; receipt: BundleReceipt }> {
   if (request.headers.get("Content-Type") !== "application/x-bpp-bundle-v5") {
-    throw new HttpError(415, "unsupported_content_type", "Bundle content type is unsupported", false);
+    throw new HttpError(
+      415,
+      "unsupported_content_type",
+      "Bundle content type is unsupported",
+      false,
+    );
   }
   const contentLength = parseContentLength(request.headers.get("Content-Length"));
   const digest = parseContentDigest(request.headers.get("Content-Digest"));

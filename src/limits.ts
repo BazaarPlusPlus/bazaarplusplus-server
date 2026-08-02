@@ -18,6 +18,10 @@ export const CLAIM_DEFAULT_LIMIT = 50;
 export const CLAIM_MAX_LIMIT = 50;
 export const MAX_DELIVERY_ATTEMPTS = 3;
 // The schedule has one delay between each pair of allowed attempts.
-// Its length must remain MAX_DELIVERY_ATTEMPTS - 1.
 export const DELIVERY_RETRY_BACKOFF_MS = [60_000, 300_000] as const;
 export const SETTLE_MAX_RESULTS = 50;
+
+// The settle SQL binds one backoff parameter per non-final attempt number.
+if (DELIVERY_RETRY_BACKOFF_MS.length !== MAX_DELIVERY_ATTEMPTS - 1) {
+  throw new Error("DELIVERY_RETRY_BACKOFF_MS must have MAX_DELIVERY_ATTEMPTS - 1 entries");
+}

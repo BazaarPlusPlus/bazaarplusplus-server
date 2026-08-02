@@ -213,9 +213,7 @@ function readProjection(
   for (const [index, definition] of statements.entries()) {
     const result = results[index];
     if (definition.read === "eligible") {
-      eligible = Number(
-        (result?.results?.[0] as { eligible?: number } | undefined)?.eligible ?? 0,
-      );
+      eligible = Number((result?.results?.[0] as { eligible?: number } | undefined)?.eligible ?? 0);
     } else if (definition.read === "inserted") {
       inserted = Number(result?.meta.changes ?? 0);
     }

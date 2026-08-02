@@ -2,12 +2,29 @@ import { HttpError } from "../errors";
 
 const MAX_JSON_BYTES = 65_536;
 
+export function oneQueryValue(
+  params: URLSearchParams,
+  name: string,
+  required: boolean,
+): string | null {
+  const values = params.getAll(name);
+  if (values.length > 1 || (required && values.length === 0)) {
+    throw new HttpError(400, "invalid_query", `${name} must appear exactly once`, false, {
+      field: name,
+    });
+  }
+  return values[0] ?? null;
+}
+
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
   if (request.headers.get("Content-Type") !== "application/json") {
     throw new HttpError(400, "invalid_json", "Content-Type must be application/json", false);
   }
   const declared = request.headers.get("Content-Length");
-  if (declared !== null && (/^[0-9]+$/.test(declared) === false || Number(declared) > MAX_JSON_BYTES)) {
+  if (
+    declared !== null &&
+    (/^[0-9]+$/.test(declared) === false || Number(declared) > MAX_JSON_BYTES)
+  ) {
     throw new HttpError(400, "invalid_json", "JSON body exceeds 64 KiB", false);
   }
   if (request.body === null) {

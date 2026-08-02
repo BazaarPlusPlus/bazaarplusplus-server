@@ -1,3 +1,4 @@
+import { HttpError, invalidBundle } from "../errors";
 import {
   MAX_BATTLES_PER_BUNDLE,
   MAX_BUNDLE_BYTES,
@@ -5,19 +6,18 @@ import {
   MAX_RUN_BYTES,
   MAX_SCREENSHOT_BYTES,
 } from "../limits";
-import { HttpError, invalidBundle } from "../errors";
 import { toHex } from "./hex";
-import type {
-  CombatantProjection,
-  ValidatedBattleProjection,
-  ValidatedBundleDescriptor,
+import {
+  type CombatantProjection,
+  type ValidatedBattleProjection,
+  type ValidatedBundleDescriptor,
+  validBundleId,
+  validIdentifier,
 } from "./manifest";
 import { BUNDLE_PREFIX_BYTES, BUNDLE_VERSION, parseBundlePrefix } from "./prefix";
 
 const STREAM_CHUNK_BYTES = 64 * 1024;
 const encoder = new TextEncoder();
-const BUNDLE_ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 
 type JsonObject = Record<string, unknown>;
@@ -170,7 +170,7 @@ function safeInteger(value: unknown, field: string): number {
 }
 
 function identifier(value: unknown, field: string): string {
-  if (typeof value !== "string" || !IDENTIFIER.test(value)) {
+  if (typeof value !== "string" || !validIdentifier(value)) {
     throw invalidBundle("manifest_schema_invalid", `${field} is invalid`);
   }
   return value;
@@ -275,7 +275,7 @@ function validateManifest(
       false,
     );
   }
-  if (typeof root.bundle_id !== "string" || !BUNDLE_ID.test(root.bundle_id)) {
+  if (typeof root.bundle_id !== "string" || !validBundleId(root.bundle_id)) {
     throw invalidBundle("manifest_schema_invalid", "bundle_id must be a canonical ULID");
   }
   const createdAtMs = safeInteger(root.created_at_ms, "created_at_ms");
@@ -289,7 +289,10 @@ function validateManifest(
   const runOffset = safeInteger(payload.offset, "run.payload.offset");
   const runLength = safeInteger(payload.length, "run.payload.length");
   if (runOffset !== 0 || runLength === 0) {
-    throw invalidBundle("run_missing", "Run segment must start at payload offset zero and be non-empty");
+    throw invalidBundle(
+      "run_missing",
+      "Run segment must start at payload offset zero and be non-empty",
+    );
   }
   if (runLength >= MAX_RUN_BYTES + 1) {
     throw invalidBundle("run_too_large", "Run segment reaches the 2 MiB limit");
@@ -339,14 +342,20 @@ function validateManifest(
     const height = safeInteger(image.height, "screenshot.height");
     const quality = safeInteger(image.quality, "screenshot.quality");
     if (width < 1 || height < 1 || quality < 1 || quality > 100) {
-      throw invalidBundle("manifest_schema_invalid", "Screenshot dimensions or quality are invalid");
+      throw invalidBundle(
+        "manifest_schema_invalid",
+        "Screenshot dimensions or quality are invalid",
+      );
     }
     safeInteger(image.captured_at_ms, "screenshot.captured_at_ms");
     if (offset < runLength) {
       throw invalidBundle("segment_overlap", "Screenshot overlaps the Run segment");
     }
     if (offset > runLength) {
-      throw invalidBundle("segment_out_of_bounds", "Screenshot does not immediately follow the Run segment");
+      throw invalidBundle(
+        "segment_out_of_bounds",
+        "Screenshot does not immediately follow the Run segment",
+      );
     }
     screenshot = {
       offset,
@@ -359,7 +368,10 @@ function validateManifest(
   const payloadBytes = runLength + (screenshot?.length ?? 0);
   const describedBytes = BUNDLE_PREFIX_BYTES + bytes.byteLength + payloadBytes;
   if (createdAtMs > 8_640_000_000_000_000) {
-    throw invalidBundle("manifest_schema_invalid", "created_at_ms is outside the supported date range");
+    throw invalidBundle(
+      "manifest_schema_invalid",
+      "created_at_ms is outside the supported date range",
+    );
   }
   const day = new Date(createdAtMs).toISOString().slice(0, 10);
   return {
@@ -477,7 +489,10 @@ function validateBundleBody(
         if (descriptor.describedObjectBytes > descriptor.objectBytes) {
           throw invalidBundle("segment_out_of_bounds", "A segment extends beyond the Bundle body");
         }
-        await Promise.all([bundleWriter.close(), ...segmentDigests.map(({ writer }) => writer.close())]);
+        await Promise.all([
+          bundleWriter.close(),
+          ...segmentDigests.map(({ writer }) => writer.close()),
+        ]);
         const segmentHashes = await Promise.all(
           segmentDigests.map(({ digest }) => digest.then(toHex)),
         );
@@ -523,9 +538,7 @@ export async function openBundle(
   const { manifestLength } = parseBundlePrefix(prefix);
   if (BUNDLE_PREFIX_BYTES + manifestLength >= contentLength) {
     await reader.cancel("manifest leaves no Run segment");
-    throw new HttpError(422, "invalid_bundle", "Bundle Run segment is missing", false, {
-      reason: "run_missing",
-    });
+    throw invalidBundle("run_missing", "Bundle Run segment is missing");
   }
   const manifest = await reader.readExactly(manifestLength);
   const descriptor = validateManifest(manifest, contentLength);

@@ -55,7 +55,7 @@ Protected requests use:
 Authorization: Bearer <43-character unpadded base64url token>
 ```
 
-The two configured tokens must be distinct. A missing, malformed, empty, or unknown token returns `401 unauthorized`. A valid token for the other service scope returns `403 insufficient_scope`. Authentication runs before JSON parsing, D1, R2, or URL signing.
+The two configured tokens must be distinct. A missing, malformed, empty, or unknown token returns `401 unauthorized`. A valid token for the other service scope returns `403 insufficient_scope`. If the deployed token configuration itself is invalid (a token missing, malformed, or both tokens equal), every protected route returns `500 internal_error` with `retryable: true` until the operator fixes the secrets. Authentication runs before JSON parsing, D1, R2, or URL signing.
 
 ## Bundle V5 wire format
 
@@ -268,7 +268,7 @@ Response `200`:
 
 Items sort by `available_at_ms ASC, bundle_id ASC`. `next_after` is `null` on the final page. The Worker queries `limit + 1` rows but signs only returned rows.
 
-Route errors: `400 invalid_query`, `400 window_not_settled`, `401 unauthorized`, `403 insufficient_scope`, `410 window_expired`, and `503 storage_unavailable`.
+Route errors: `400 invalid_query`, `400 window_not_settled`, `401 unauthorized`, `403 insufficient_scope`, `410 window_expired`, `500 internal_error` (invalid service token configuration), and `503 storage_unavailable`.
 
 ## `GET /ghost-battles`
 
@@ -370,7 +370,7 @@ No work returns `{"claim_id":null,"expires_at_ms":null,"items":[]}`.
 
 The lease is ten minutes. An attempt is counted atomically when claimed, with a maximum of three. Multiple consumers cannot receive the same Bundle under overlapping valid leases. A response lost after claiming leaves the lease to expire naturally. URL-signing failure is compensated by removing this claim's receipts and restoring only rows still owned by this claim; a failed compensation remains recoverable by lease expiry.
 
-Route errors: `400 invalid_json`, `400 invalid_limit`, `401 unauthorized`, `403 insufficient_scope`, and `503 storage_unavailable`.
+Route errors: `400 invalid_json`, `400 invalid_limit`, `401 unauthorized`, `403 insufficient_scope`, `500 internal_error` (invalid service token configuration), and `503 storage_unavailable`.
 
 ## `POST /bazaardb/deliveries/settle`
 
@@ -423,7 +423,7 @@ Per-item `status` is:
 
 `accepted` becomes done. `permanent_failure` becomes failed. The first retryable failure waits 60 seconds, the second waits five minutes, and the third becomes failed with `delivery_attempts_exhausted`. Before selecting a claim page, `POST /bazaardb/deliveries/claim` also marks pending Bundles older than the 14-day R2 retention as `bundle_expired` and expired third leases as `delivery_attempts_exhausted`. Attempt receipts are immutable across later attempts, so response-loss retries remain idempotent.
 
-Route errors: `400 invalid_json`, `400 invalid_settle_request`, `401 unauthorized`, `403 insufficient_scope`, and `503 storage_unavailable`.
+Route errors: `400 invalid_json`, `400 invalid_settle_request`, `401 unauthorized`, `403 insufficient_scope`, `500 internal_error` (invalid service token configuration), and `503 storage_unavailable`.
 
 ## Presigned downloads
 

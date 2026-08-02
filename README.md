@@ -24,7 +24,9 @@ npm test
 npm run dev
 ```
 
-Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations and R2 bindings. `npm run check` type-checks production and test code.
+Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations and R2 bindings. `npm run check` type-checks production and test code, then lints and verifies formatting with Biome; `npm run format` rewrites files in place.
+
+`npm run dev` requires a git-ignored `.dev.vars` file providing the three secrets listed under Production configuration (`R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, `BAZAARDB_DELIVERY_TOKEN`); the Worker fails closed without them. Tests inject their own values and need no `.dev.vars`.
 
 ## Code layout
 

@@ -1,9 +1,9 @@
 import type { Env } from "../env";
+import { HttpError } from "../errors";
+import { logError } from "../observability";
 import { authenticateServiceToken, type ServiceScope } from "./auth";
 import { createHandlerDeps, type HandlerDeps } from "./deps";
-import { HttpError } from "../errors";
 import { jsonError, jsonResponse } from "./json";
-import { logError } from "../observability";
 
 export interface HandlerContext {
   readonly request: Request;
@@ -67,7 +67,10 @@ function optionsResponse(route: IndexedPath): Response {
   return new Response(null, { status: 204, headers });
 }
 
-function authDenial(outcome: ReturnType<typeof authenticateServiceToken>, requestId: string): Response {
+function authDenial(
+  outcome: ReturnType<typeof authenticateServiceToken>,
+  requestId: string,
+): Response {
   if (outcome === "insufficient_scope") {
     return jsonError(
       {

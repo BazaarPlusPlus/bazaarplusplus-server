@@ -16,7 +16,7 @@ function constantTimeTokenEquals(candidate: string, configured: string): boolean
   return difference === 0;
 }
 
-export function configuredTokensAreValid(env: Env): boolean {
+function configuredTokensAreValid(env: Env): boolean {
   const sync = env.BUNDLE_SYNC_TOKEN;
   const delivery = env.BAZAARDB_DELIVERY_TOKEN;
   return (

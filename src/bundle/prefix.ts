@@ -1,9 +1,10 @@
-import { MAX_MANIFEST_BYTES } from "../limits";
 import { HttpError, invalidBundle } from "../errors";
+import { MAX_MANIFEST_BYTES } from "../limits";
 
 export const BUNDLE_PREFIX_BYTES = 16;
-export const BUNDLE_MAGIC = "BPPBNDL5";
 export const BUNDLE_VERSION = 5;
+
+const BUNDLE_MAGIC = "BPPBNDL5";
 
 export interface BundlePrefix {
   manifestLength: number;

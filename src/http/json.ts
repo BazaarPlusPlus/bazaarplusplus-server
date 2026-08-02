@@ -1,7 +1,4 @@
-export function jsonResponse(
-  body: unknown,
-  init: ResponseInit & { requestId: string },
-): Response {
+export function jsonResponse(body: unknown, init: ResponseInit & { requestId: string }): Response {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json; charset=utf-8");
   headers.set("Cache-Control", "no-store");
