@@ -1,0 +1,219 @@
+import { env } from "cloudflare:test";
+import { describe, expect, test } from "vitest";
+
+import worker from "../src/index";
+import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
+
+const DELIVERY_TOKEN = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+async function uploadScreenshotBundle(index: number): Promise<string> {
+  const suffix = String(index).padStart(3, "0");
+  const bundleId = `01J00000000000000000003${suffix}`;
+  const fixture = await makeBundleFixture({
+    bundleId,
+    runId: `delivery-run-${index}`,
+    uploaderAccountId: `delivery-uploader-${index}`,
+    screenshotBytes: new Uint8Array([0xff, 0xd8, index & 0xff, 0xff, 0xd9]),
+    battles: [],
+  });
+  const response = await worker.fetch(uploadRequest(fixture.body, fixture.headers), env);
+  expect(response.status).toBe(201);
+  return bundleId;
+}
+
+function deliveryRequest(path: "claim" | "settle", body: unknown): Request {
+  return new Request(
+    `https://mod-api-v5.bazaarplusplus.com/bazaardb/deliveries/${path}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${DELIVERY_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+async function claim(limit = 1): Promise<{
+  claim_id: string | null;
+  expires_at_ms: number | null;
+  items: Array<{ bundle_id: string; download_url: string; content_type: string; sha256: string }>;
+}> {
+  const response = await worker.fetch(deliveryRequest("claim", { limit }), env);
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+describe("BazaarDB delivery claim and settle", () => {
+  test("concurrent consumers claim non-overlapping Bundles", async () => {
+    const expected = await Promise.all([uploadScreenshotBundle(1), uploadScreenshotBundle(2)]);
+    const [left, right] = await Promise.all([claim(), claim()]);
+
+    expect(left.claim_id).toMatch(/^clm_[0-9a-f-]{36}$/);
+    expect(right.claim_id).toMatch(/^clm_[0-9a-f-]{36}$/);
+    expect(left.items).toHaveLength(1);
+    expect(right.items).toHaveLength(1);
+    expect([left.items[0].bundle_id, right.items[0].bundle_id].sort()).toEqual(expected.sort());
+    expect(left.items[0].content_type).toBe("application/x-bpp-bundle-v5");
+    expect(left.items[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(new URL(left.items[0].download_url).searchParams.get("X-Amz-Expires")).toBe("604800");
+  });
+
+  test("retryable settle is idempotent across a later attempt", async () => {
+    const bundleId = await uploadScreenshotBundle(3);
+    const firstClaim = await claim();
+    expect(firstClaim.items[0].bundle_id).toBe(bundleId);
+    const result = { bundle_id: bundleId, outcome: "retryable_failure", reason: "timeout" };
+
+    const first = await worker.fetch(
+      deliveryRequest("settle", { claim_id: firstClaim.claim_id, results: [result] }),
+      env,
+    );
+    expect(first.status).toBe(200);
+    expect((await first.json()) as object).toMatchObject({
+      items: [{ bundle_id: bundleId, status: "applied", state: "pending" }],
+      summary: { applied: 1, duplicate: 0, rejected: 0 },
+    });
+
+    await env.DB.prepare(
+      `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+    )
+      .bind(Date.now() - 1, bundleId)
+      .run();
+    const secondClaim = await claim();
+    expect(secondClaim.items[0].bundle_id).toBe(bundleId);
+
+    const replay = await worker.fetch(
+      deliveryRequest("settle", { claim_id: firstClaim.claim_id, results: [result] }),
+      env,
+    );
+    expect((await replay.json()) as object).toMatchObject({
+      items: [{ bundle_id: bundleId, status: "duplicate", state: "pending" }],
+      summary: { applied: 0, duplicate: 1, rejected: 0 },
+    });
+    const active = await env.DB.prepare(
+      `SELECT active_claim_id, delivery_attempts FROM bazaardb_deliveries WHERE bundle_id = ?1`,
+    )
+      .bind(bundleId)
+      .first<{ active_claim_id: string; delivery_attempts: number }>();
+    expect(active).toEqual({ active_claim_id: secondClaim.claim_id, delivery_attempts: 2 });
+  });
+
+  test("accepted, permanent, conflict and unknown outcomes are complete", async () => {
+    const acceptedId = await uploadScreenshotBundle(4);
+    const acceptedClaim = await claim();
+    expect(acceptedClaim.items[0].bundle_id).toBe(acceptedId);
+    const accepted = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: acceptedClaim.claim_id,
+        results: [{ bundle_id: acceptedId, outcome: "accepted" }],
+      }),
+      env,
+    );
+    expect((await accepted.json()) as object).toMatchObject({
+      items: [{ status: "applied", state: "done", next_claim_at_ms: null }],
+    });
+
+    const conflict = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: acceptedClaim.claim_id,
+        results: [
+          { bundle_id: acceptedId, outcome: "permanent_failure", reason: "invalid_data" },
+          {
+            bundle_id: "01J00000000000000000003999",
+            outcome: "permanent_failure",
+            reason: "invalid_data",
+          },
+        ],
+      }),
+      env,
+    );
+    expect((await conflict.json()) as object).toMatchObject({
+      items: [
+        { status: "outcome_conflict", state: "done" },
+        { status: "unknown_item", state: null },
+      ],
+      summary: { applied: 0, duplicate: 0, rejected: 2 },
+    });
+
+    const permanentId = await uploadScreenshotBundle(5);
+    const permanentClaim = await claim();
+    const permanent = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: permanentClaim.claim_id,
+        results: [
+          { bundle_id: permanentId, outcome: "permanent_failure", reason: "invalid_data" },
+        ],
+      }),
+      env,
+    );
+    expect((await permanent.json()) as object).toMatchObject({
+      items: [{ status: "applied", state: "failed" }],
+    });
+  });
+
+  test("an unreturned third lease becomes exhausted after expiry", async () => {
+    const bundleId = await uploadScreenshotBundle(6);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const leased = await claim();
+      expect(leased.items[0].bundle_id).toBe(bundleId);
+      await env.DB.prepare(
+        `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+      )
+        .bind(Date.now() - 1, bundleId)
+        .run();
+    }
+    const empty = await claim();
+    expect(empty).toEqual({ claim_id: null, expires_at_ms: null, items: [] });
+    const row = await env.DB.prepare(
+      `SELECT delivery_state, failure_reason FROM bazaardb_deliveries WHERE bundle_id = ?1`,
+    )
+      .bind(bundleId)
+      .first();
+    expect(row).toEqual({
+      delivery_state: "failed",
+      failure_reason: "delivery_attempts_exhausted",
+    });
+  });
+
+  test("claim lazily fails a pending Bundle whose R2 retention elapsed", async () => {
+    const bundleId = await uploadScreenshotBundle(10);
+    await env.DB.prepare(`UPDATE bundles SET stored_at_ms = ?1 WHERE bundle_id = ?2`)
+      .bind(Date.now() - 14 * 86_400_000 - 1, bundleId)
+      .run();
+
+    expect(await claim()).toEqual({ claim_id: null, expires_at_ms: null, items: [] });
+    expect(
+      await env.DB.prepare(
+        `SELECT delivery_state, failure_reason
+         FROM bazaardb_deliveries WHERE bundle_id = ?1`,
+      )
+        .bind(bundleId)
+        .first(),
+    ).toEqual({ delivery_state: "failed", failure_reason: "bundle_expired" });
+  });
+
+  test("returns a multi-item claim in pre-claim claimable order", async () => {
+    const [first, second, third] = await Promise.all([
+      uploadScreenshotBundle(7),
+      uploadScreenshotBundle(8),
+      uploadScreenshotBundle(9),
+    ]);
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+      ).bind(now - 300, first),
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+      ).bind(now - 100, second),
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+      ).bind(now - 200, third),
+    ]);
+
+    const result = await claim(3);
+    expect(result.items.map(({ bundle_id }) => bundle_id)).toEqual([first, third, second]);
+  });
+});

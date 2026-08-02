@@ -1,0 +1,157 @@
+import { validBundleId } from "../bundle/manifest";
+import {
+  SYNC_DEFAULT_LIMIT,
+  SYNC_MAX_LIMIT,
+  SYNC_MAX_LOOKBACK_MS,
+  SYNC_SETTLE_LAG_MS,
+} from "../domain/limits";
+import type { Env } from "../env";
+import { HttpError } from "../http/errors";
+import { logEvent } from "../observability";
+import { createBundleDownloadSigner } from "../r2/presigner";
+
+interface CollectionRow {
+  bundle_id: string;
+  available_at_ms: number;
+  object_key: string;
+}
+
+function oneValue(params: URLSearchParams, name: string, required: boolean): string | null {
+  const values = params.getAll(name);
+  if (values.length > 1 || (required && values.length === 0)) {
+    throw new HttpError(400, "invalid_query", `${name} must appear exactly once`, false, {
+      field: name,
+    });
+  }
+  return values[0] ?? null;
+}
+
+function integer(value: string | null, field: string): number {
+  if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new HttpError(400, "invalid_query", `${field} must be a non-negative safe integer`, false, {
+      field,
+    });
+  }
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) {
+    throw new HttpError(400, "invalid_query", `${field} must be a non-negative safe integer`, false, {
+      field,
+    });
+  }
+  return result;
+}
+
+export async function collectBundles(
+  request: Request,
+  env: Env,
+  requestId: string,
+): Promise<Record<string, unknown>> {
+  const url = new URL(request.url);
+  const allowed = new Set([
+    "available_from_ms",
+    "available_before_ms",
+    "limit",
+    "after_available_at_ms",
+    "after_bundle_id",
+  ]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key)) {
+      throw new HttpError(400, "invalid_query", `Unknown query parameter: ${key}`, false, {
+        field: key,
+      });
+    }
+  }
+
+  const now = Date.now();
+  const settlePoint = now - SYNC_SETTLE_LAG_MS;
+  const from = integer(oneValue(url.searchParams, "available_from_ms", true), "available_from_ms");
+  if (from < now - SYNC_MAX_LOOKBACK_MS) {
+    throw new HttpError(410, "window_expired", "Bundle window is outside R2 retention", false);
+  }
+  const beforeValue = oneValue(url.searchParams, "available_before_ms", false);
+  const before = beforeValue === null ? settlePoint : integer(beforeValue, "available_before_ms");
+  if (before > settlePoint) {
+    throw new HttpError(400, "window_not_settled", "Bundle window end is not settled", false);
+  }
+  if (from >= before) {
+    throw new HttpError(400, "invalid_query", "available_from_ms must be before available_before_ms", false);
+  }
+
+  const limitValue = oneValue(url.searchParams, "limit", false);
+  const limit = limitValue === null ? SYNC_DEFAULT_LIMIT : integer(limitValue, "limit");
+  if (limit < 1 || limit > SYNC_MAX_LIMIT) {
+    throw new HttpError(400, "invalid_query", "limit must be between 1 and 500", false, {
+      field: "limit",
+    });
+  }
+  const afterTimeValue = oneValue(url.searchParams, "after_available_at_ms", false);
+  const afterId = oneValue(url.searchParams, "after_bundle_id", false);
+  if ((afterTimeValue === null) !== (afterId === null)) {
+    throw new HttpError(400, "invalid_query", "Both keyset position fields are required", false);
+  }
+  const afterTime = afterTimeValue === null ? null : integer(afterTimeValue, "after_available_at_ms");
+  if (
+    afterTime !== null &&
+    (afterTime < from || afterTime >= before || afterId === null || !validBundleId(afterId))
+  ) {
+    throw new HttpError(400, "invalid_query", "Keyset position is outside the fixed window", false);
+  }
+
+  let rows: CollectionRow[];
+  try {
+    const result = await env.DB.prepare(
+      `SELECT bundle_id, available_at_ms, object_key
+       FROM bundles INDEXED BY idx_bundles_available
+       WHERE available_at_ms >= ?1
+         AND available_at_ms < ?2
+         AND (
+           ?3 IS NULL
+           OR available_at_ms > ?3
+           OR (available_at_ms = ?3 AND bundle_id > ?4)
+         )
+       ORDER BY available_at_ms ASC, bundle_id ASC
+       LIMIT ?5`,
+    )
+      .bind(from, before, afterTime, afterId, limit + 1)
+      .all<CollectionRow>();
+    rows = result.results;
+  } catch {
+    throw new HttpError(503, "storage_unavailable", "Bundle index query failed", true);
+  }
+
+  const hasNext = rows.length > limit;
+  const returned = rows.slice(0, limit);
+  const signer = createBundleDownloadSigner(env);
+  let items: Array<Record<string, unknown>>;
+  try {
+    items = await Promise.all(
+      returned.map(async (row) => {
+        const signed = await signer.sign(row.object_key, now);
+        return {
+          bundle_id: row.bundle_id,
+          available_at_ms: row.available_at_ms,
+          download_url: signed.url,
+          download_expires_at_ms: signed.expiresAtMs,
+        };
+      }),
+    );
+  } catch {
+    throw new HttpError(503, "storage_unavailable", "Bundle URL signing failed", true);
+  }
+  const last = returned.at(-1);
+  logEvent("bundle.collection", {
+    request_id: requestId,
+    available_from_ms: from,
+    available_before_ms: before,
+    row_count: returned.length,
+    has_next: hasNext,
+  });
+  return {
+    window: { available_from_ms: from, available_before_ms: before },
+    items,
+    next_after:
+      hasNext && last !== undefined
+        ? { available_at_ms: last.available_at_ms, bundle_id: last.bundle_id }
+        : null,
+  };
+}

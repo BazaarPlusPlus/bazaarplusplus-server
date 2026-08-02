@@ -14,3 +14,8 @@ declare namespace Cloudflare {
     TEST_MIGRATIONS: import("@cloudflare/vitest-pool-workers").D1Migration[];
   }
 }
+
+declare module "*?raw" {
+  const content: string;
+  export default content;
+}

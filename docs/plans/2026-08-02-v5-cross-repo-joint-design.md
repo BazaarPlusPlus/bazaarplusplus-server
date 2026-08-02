@@ -2,7 +2,7 @@
 
 日期：2026-08-02
 
-状态：已决策，待实现
+状态：已实现；本文是跨仓最终契约
 
 范围：`bazaarplusplus-mod` / `bazaarplusplus-server` / `bazaarplusplus-analyzers` / BazaarDB 消费接口
 
@@ -208,6 +208,8 @@ Bundle 不做外层压缩：
 - Screenshot 已经是压缩图片，不再重复 gzip；
 - Worker 可在不解压 Run 的情况下验证各 segment 并写索引。
 
+fixed prefix 固定为 16 bytes：offset `0..7` 是 ASCII `BPPBNDL5`，offset `8..11` 是 u32 big-endian `bundle_version`，offset `12..15` 是 u32 big-endian `manifest_length`。所有 segment offset 相对 manifest 后的第一个 payload byte。
+
 manifest 最小形状：
 
 ```json
@@ -364,7 +366,7 @@ Worker 不信任客户端提供的 R2 key，也不接受 caller-provided absolut
 - 同 `run_id` 已属于另一个 `bundle_id`：409 `run_already_bundled`。
 - Worker 不解压 Run，因此 ingest 只校验 manifest 声明的 `run_id` 与 `run_format_version`；Analyzer 与 BazaarDB decoder 下载解压后必须把 Run 根节点 identity/version 与 manifest 比较，不一致时 quarantine。
 - R2 PUT 后 digest 不匹配：删除对象，不写 D1，返回 422。
-- R2 PUT 后、D1 commit 前中断：重试或 reconciler 重新 GET 并验证完整对象后补写 D1。
+- R2 PUT 后、D1 commit 前中断：相同 Bundle 的客户端重试重新 GET 并验证完整对象后补写 D1；未重试的 object 由 14 天 R2 lifecycle 删除。
 
 `contracts/v5/versions.yaml` 是 `bundle_version`、`run_format_version` 与 accepted sets 的唯一登记处。追加可忽略字段不 bump；删除、改名或改语义才 bump。
 
@@ -498,7 +500,7 @@ Analyzer sync 流程：
 4. 只有 `next_after = null` 时才持久化新的 `last_completed_before_ms`。
 5. 进程中断后重放整个未完成窗口，以 `bundle_id` 去重。
 
-Worker 不保存 analyzer session、watermark、cursor 或完成状态。60 秒 settle lag 与下一窗口的 60 秒 overlap 防止并发 D1 commit 落在分页切面上；重复项由 analyzer 按 `bundle_id` 去重。`available_at_ms` 在正常 ingest 的 D1 commit 时生成；orphan 经 reconciler 恢复时使用恢复 commit time，因此不会被塞回 analyzer 已经完成的旧窗口。
+Worker 不保存 analyzer session、watermark、cursor 或完成状态。60 秒 settle lag 与下一窗口的 60 秒 overlap 防止并发 D1 commit 落在分页切面上；重复项由 analyzer 按 `bundle_id` 去重。`available_at_ms` 在 D1 commit 时生成；R2-only object 经相同上传重试补写时使用重试 commit time，因此不会被塞回 analyzer 已经完成的旧窗口。
 
 `download_expires_at_ms` 只表示 SigV4 授权期限，不延长 R2 object lifecycle。Analyzer 必须枚举后立即下载；watermark 接近 14 天 retention 时告警，不能把 presigned URL 当作额外保留承诺。
 
@@ -620,7 +622,10 @@ CREATE TABLE bundles (
   run_id                  TEXT NOT NULL UNIQUE,
   uploader_account_id     TEXT NOT NULL,
   object_key              TEXT NOT NULL UNIQUE,
-  bundle_sha256           TEXT NOT NULL CHECK (length(bundle_sha256) = 64),
+  bundle_sha256           TEXT NOT NULL CHECK (
+    length(bundle_sha256) = 64
+    AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   bundle_version          INTEGER NOT NULL CHECK (bundle_version = 5),
   manifest_bytes          INTEGER NOT NULL CHECK (manifest_bytes BETWEEN 1 AND 2097152),
   object_bytes            INTEGER NOT NULL CHECK (object_bytes BETWEEN 1 AND 8388607),
@@ -629,7 +634,10 @@ CREATE TABLE bundles (
   available_at_ms         INTEGER NOT NULL,
   run_format_version      INTEGER NOT NULL CHECK (run_format_version = 5),
   run_bytes               INTEGER NOT NULL CHECK (run_bytes BETWEEN 1 AND 2097151),
-  run_sha256              TEXT NOT NULL CHECK (length(run_sha256) = 64),
+  run_sha256              TEXT NOT NULL CHECK (
+    length(run_sha256) = 64
+    AND run_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   has_screenshot          INTEGER NOT NULL CHECK (has_screenshot IN (0, 1)),
   screenshot_content_type TEXT,
   screenshot_bytes       INTEGER,
@@ -650,11 +658,15 @@ CREATE TABLE bundles (
       AND screenshot_bytes BETWEEN 1 AND 1048576
       AND screenshot_sha256 IS NOT NULL
       AND length(screenshot_sha256) = 64
+      AND screenshot_sha256 NOT GLOB '*[^0-9a-f]*'
     )
   )
 );
 CREATE INDEX idx_bundles_available
   ON bundles(available_at_ms, bundle_id, object_key);
+
+CREATE INDEX idx_bundles_stored_retention
+  ON bundles(stored_at_ms, bundle_id);
 
 CREATE TABLE ghost_battles (
   uploader_account_id  TEXT NOT NULL,
@@ -668,9 +680,6 @@ CREATE TABLE ghost_battles (
 ) WITHOUT ROWID;
 CREATE INDEX idx_ghost_battles_query
   ON ghost_battles(opponent_account_id, recorded_at_ms DESC, battle_id DESC);
-CREATE INDEX idx_ghost_battles_ttl
-  ON ghost_battles(recorded_at_ms, uploader_account_id, battle_id);
-
 CREATE TABLE bundle_uploaders (
   player_account_id  TEXT PRIMARY KEY,
   first_bundle_at_ms INTEGER NOT NULL
@@ -681,6 +690,13 @@ CREATE TABLE bazaardb_deliveries (
   delivery_state         TEXT NOT NULL DEFAULT 'pending'
     CHECK (delivery_state IN ('pending', 'done', 'failed')),
   active_claim_id        TEXT,
+  active_claim_order     INTEGER CHECK (
+    active_claim_order IS NULL
+    OR (
+      typeof(active_claim_order) = 'integer'
+      AND active_claim_order BETWEEN 0 AND 49
+    )
+  ),
   claimable_at_ms        INTEGER NOT NULL,
   delivery_attempts      INTEGER NOT NULL DEFAULT 0
     CHECK (delivery_attempts BETWEEN 0 AND 3),
@@ -690,7 +706,12 @@ CREATE TABLE bazaardb_deliveries (
   failed_at_ms           INTEGER,
   failure_reason         TEXT,
   CHECK (
-    active_claim_id IS NULL OR delivery_state = 'pending'
+    (active_claim_id IS NULL AND active_claim_order IS NULL)
+    OR (
+      active_claim_id IS NOT NULL
+      AND active_claim_order IS NOT NULL
+      AND delivery_state = 'pending'
+    )
   ),
   CHECK (
     (
@@ -718,6 +739,9 @@ CREATE INDEX idx_bazaardb_claimable
   WHERE delivery_state = 'pending' AND delivery_attempts < 3;
 CREATE INDEX idx_bazaardb_active_claim
   ON bazaardb_deliveries(active_claim_id, bundle_id)
+  WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
+CREATE INDEX idx_bazaardb_active_claim_order
+  ON bazaardb_deliveries(active_claim_id, active_claim_order, bundle_id)
   WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
 CREATE INDEX idx_bazaardb_exhausted_lease
   ON bazaardb_deliveries(claimable_at_ms, bundle_id)
@@ -751,13 +775,6 @@ CREATE TABLE bazaardb_delivery_attempts (
   )
 ) WITHOUT ROWID;
 
-CREATE TABLE maintenance_state (
-  job_name      TEXT PRIMARY KEY,
-  cursor_json   TEXT,
-  last_start_ms INTEGER,
-  last_ok_ms    INTEGER,
-  last_error    TEXT
-) WITHOUT ROWID;
 ```
 
 ### 6.1 SQL 设计理由
@@ -826,7 +843,9 @@ LIMIT ?5;
 | Ghost discovery | `opponent_account_id = ?`；按 `recorded_at_ms, battle_id` 倒序 | `idx_ghost_battles_query` + `bundles` primary key join |
 | BazaarDB claim | `claimable_at_ms <= now`，按 `claimable_at_ms, created_at_ms, bundle_id` | `idx_bazaardb_claimable` |
 | BazaarDB active settle / lease lookup | `active_claim_id = ?` | `idx_bazaardb_active_claim` |
+| BazaarDB active claim response order | `active_claim_id = ?`；按 `active_claim_order, bundle_id` | `idx_bazaardb_active_claim_order` |
 | BazaarDB settle receipt / 幂等 | `claim_id = ? AND bundle_id = ?` | `bazaardb_delivery_attempts` primary key |
+| Claim-time Bundle expiry | `stored_at_ms < cutoff` | `idx_bundles_stored_retention` |
 
 BazaarDB claim 的候选查询固定为：
 
@@ -840,7 +859,7 @@ ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
 LIMIT ?2;
 ```
 
-claim transaction 把选中 rows 的 `active_claim_id` 写为新 claim，并把 `claimable_at_ms` 推到 lease expiry。租约自然过期后，同一索引会让 row 再次可领取；`retryable_failure` 可以把它设置为带 backoff 的下一次时间。
+claim transaction 把选中 rows 的 `active_claim_id` 写为新 claim，持久化候选顺序到 `active_claim_order`，并把 `claimable_at_ms` 推到 lease expiry。租约自然过期后，同一索引会让 row 再次可领取；`retryable_failure` 可以把它设置为带 backoff 的下一次时间。
 
 不创建 `(player_account_id, ended_at_ms)` 索引，因为 V5 没有按玩家列举 Bundle 的 interface。将来出现真实查询后再增加，避免当前每次 ingest 支付无消费者的 D1 index write。
 
@@ -881,19 +900,17 @@ V5 选择“一局一个 Bundle”的简单不变量，不使用跨 Run 聚合�
 固定顺序：R2 PUT 成功后再 D1 transaction。
 
 - R2 失败：D1 无记录，本地 sealed Bundle 重试。
-- R2 成功、D1 失败：确定性 key 不产生额外对象；重试/reconciler 完整校验后重做 transaction。
+- R2 成功、D1 失败：确定性 key 不产生额外对象；相同 Bundle 重试完整校验后重做 transaction。
 - D1 成功、response 丢失：同 bundle_id 重试返回 duplicate。
 
 R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_sha256`。完整 Run/Screenshot index 只存在 Bundle manifest 与 D1。
 
-### 8.2 Reconciler
+### 8.2 Request-driven recovery and manual D1 maintenance
 
-夜间 cron：
-
-- LIST `bundles/<date>/`，恢复 R2 有、D1 无的对象；完整校验 digest 后重放 projection。
-- 找 D1 有、R2 无且仍在 retention window 内的 Bundle并告警；已签发 URL 会由 R2 返回 `NoSuchKey`。
-- 检查过期 BazaarDB leases 并恢复 pending。
-- 记录 last-success heartbeat；heartbeat 缺失本身告警。
+- R2-only object 只由相同 `POST /bundles` 重试恢复；重试完整校验既有 object 后提交 D1。客户端未重试时，R2 bucket lifecycle 在 14 天后删除 object。
+- BazaarDB `claim` 在选取候选前惰性标记越过 R2 retention 的 pending Bundle 和租约已过期的第三次 attempt。
+- Worker 只导出 `fetch`，不配置 cron 或 `scheduled()`，不自动删除任何 D1 row。
+- Ghost 与 Bundle collection 的时间窗口只限制 API 可见性；D1 cleanup 由 operator 在 Worker 之外显式执行。
 
 ### 8.3 Download 行为
 
@@ -908,10 +925,10 @@ R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_s
 ### 8.4 Retention
 
 - R2 Bundle：14 天。
-- `ghost_battles`：7 天，覆盖 5 天 ghost window 与余量。
+- `ghost_battles`：API 只查询 5 天窗口；row 保留时间由人工 D1 maintenance 决定。
 - `bundle_uploaders`：V5 deployment lifetime 内单调记录 uploader；V5 上线时从空表开始。
-- D1 `bundles`、done/failed deliveries：30 天。
-- pending delivery 接近 R2 expiry 时提高领取优先级；超过窗口转 failed `bundle_expired`，不静默删除。
+- D1 `bundles` 及其依赖的 Ghost/delivery/attempt rows：不自动过期，由 operator 明确选择并删除；删除 Bundle 时外键级联清理依赖记录。
+- pending delivery 越过 14 天 R2 retention 后，在下一次 claim 时转 failed `bundle_expired`；从未再次访问的 row 保留到人工清理。
 - BazaarDB accepted 后 Bundle 仍按统一 14 天 policy 保留，不提前删除。
 - 隐私说明必须明确：opt-in Screenshot 会随完整 Bundle 提供给 ghost 对手客户端、BazaarDB 和 analyzers。
 
@@ -930,10 +947,10 @@ R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_s
 
 ### bazaarplusplus-server / modapiv5
 
-- V5 Worker 固定在 `workers/mod-api-v5/`，拥有独立 wrangler、migrations 和 tests。
+- V5 orphan 分支以仓库根目录为独立 Worker package，拥有独立 wrangler、migrations 和 tests，不创建嵌套工程。
 - ingest 只解析 bounded Bundle manifest，不解压 Run。
 - 用一个 service-token verifier module 保护 Bundle collection 与 BazaarDB control routes；两个 scope 不共享 token。
-- 拥有 Bundle ingest、D1 projection、R2 GET presigner、ghost feed、analyzer time-window sync、BazaarDB delivery、reconciler 与 TTL；不代理 Bundle download bytes。
+- 拥有 Bundle ingest、D1 projection、R2 GET presigner、ghost feed、analyzer time-window sync 与 BazaarDB delivery；不代理 Bundle download bytes，也不运行 scheduled maintenance。
 - `contracts/v5/` 是 Bundle/Run schema、accepted versions、projection 与 golden vectors 的权威登记处。
 
 ### bazaarplusplus-analyzers
@@ -980,7 +997,7 @@ R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_s
 
 ---
 
-## 11. 实现分解
+## 11. 跨仓模块边界
 
 1. `contracts/v5`：Bundle prefix/manifest、Run schema、versions、golden vectors、恶意 segment fixtures。
 2. mod paths/storage：`BazaarPlusPlusV5` path provider、全新 local schema、Bundle queue 与 dead letter。
@@ -988,7 +1005,7 @@ R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_s
 4. modapiv5 ingest：bounded manifest parser、streaming hashes、R2 PUT、D1 transaction 与幂等。
 5. modapiv5 presign：从 query result 取得 object key，生成 7 天 R2 `GetObject` presigned URL；无 Worker download handler。
 6. modapiv5 reads：service-token verifier、Ghost Battle per-IP rate limiter、ghost feed、Bundle collection time-window sync、BazaarDB claim/settle。
-7. modapiv5 ops：reconciler、TTL、metrics、dashboards 与 last-success alerts。
+7. modapiv5 ops：metrics、dashboards 与独立的人工 D1 maintenance runbook。
 8. analyzers：Bundle feed/cache、Run V5 decoder、双源去重与 quarantine。
 9. BazaarDB：claim/settle、Bundle V5 decoder、bundle_id 幂等与双源 drain。
 
@@ -1006,7 +1023,7 @@ R2 custom metadata 只允许写 `bundle_version`、`manifest_length`、`bundle_s
 - 同 `bundle_id` 不同 digest 返回 409；同 `run_id` 换另一个 `bundle_id` 返回 409。
 - Run payload 达到 2 MiB 或 Bundle 达到 8 MiB 时被拒绝；边界以下的 Bundle 正常接收。
 - 接近 8 MiB 的合法 Bundle 不被 Worker 整体缓冲，内存压力测试通过。
-- R2 PUT 后、D1 commit 前注入故障，重试与 reconciler 均能恢复全部索引。
+- R2 PUT 后、D1 commit 前注入故障，相同 Bundle 重试能恢复全部索引。
 - C# serializer/decoder、Python decoder、BazaarDB decoder 对同一 golden vector 得到相同逻辑对象。
 - Analyzer 与 BazaarDB decoder 对 Run 根节点和 manifest 的 `run_id/run_format_version` 做一致性检查；不一致 Bundle 进入 quarantine。
 - V4 decoder 拒绝 Run V5，V5 decoder 拒绝 V4 contractless artifact；双源按 Content-Type 分派。

@@ -9,6 +9,10 @@
 - Ghost projection accepts only a self opponent or an opponent already in `bundle_uploaders`. Filtered history is never backfilled.
 - Duplicate `battle_id` values inside one Bundle are invalid. A repeated `(uploader_account_id, battle_id)` across Bundles is anomalous: preserve the first projection and record a metric; never merge fields across Bundles.
 - The Worker never exposes a Bundle download proxy and never decompresses the Run payload during ingest.
+- The Bundle prefix is 16 bytes: ASCII `BPPBNDL5`, u32 big-endian version, and u32 big-endian manifest length.
+- All public HTTP paths are listed in `docs/api-reference.md`; adding a route requires updating the route table, contract tests, and API reference together.
+- Protected routes authenticate before parsing/querying. `GET /ghost-battles` calls its rate-limit binding before business query parsing or D1 access.
+- R2 object retention is an externally provisioned 14-day lifecycle rule. Every issued presigned URL is a seven-day S3 `GetObject` capability.
 - Tests exercise public module interfaces. Storage adapter tests may inspect schema and query plans when the migration or SQL statement is the interface under test.
 
 # Pull Request Hygiene

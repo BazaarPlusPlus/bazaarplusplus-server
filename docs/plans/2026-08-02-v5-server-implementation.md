@@ -2,9 +2,9 @@
 
 日期：2026-08-02
 
-状态：已决策，待实现
+状态：已实现；本文描述 server 最终状态
 
-范围：`bazaarplusplus-server/workers/mod-api-v5` 及其独立 D1、R2、HTTP interface、定时维护和测试
+范围：V5 orphan 分支根目录及其独立 D1、R2、HTTP interface 和测试
 
 本文是 [`2026-08-02-v5-cross-repo-joint-design.md`](./2026-08-02-v5-cross-repo-joint-design.md) 的 server 落地设计。跨仓文档负责 Bundle / Run / Screenshot 契约与调用方职责；本文负责把 modapiv5 的 route、错误、模块、SQL、R2 和故障语义定义到可直接实现的程度。
 
@@ -27,14 +27,13 @@ modapiv5 是一个全新的 Cloudflare Worker，不在 V4 根目录的 `src/`、
 | R2 presigned GET 有效期 | 7 天，即 `604800` 秒 |
 | Bundle R2 retention | 14 天 |
 
-Worker 只做六个领域动作：
+Worker 只做五个领域动作：
 
 1. 接收一个不可变 Bundle；
 2. 按可用时间窗口枚举 Bundle；
 3. 查询 ghost battles；
 4. 为查询结果签发 R2 presigned GET URL；
-5. 领取与结算 BazaarDB deliveries；
-6. 定时修复 R2 / D1 orphan 并执行 D1 TTL。
+5. 领取与结算 BazaarDB deliveries。
 
 Worker 不做：
 
@@ -52,75 +51,39 @@ Worker 不做：
 
 ## 1. 代码布局
 
-V4 继续留在仓库根目录。V5 使用独立 package、wrangler 配置、migration lineage 和测试环境：
+V5 orphan 分支根目录是独立 package，拥有自己的 wrangler 配置、migration lineage 和测试环境：
 
 ```text
-bazaarplusplus-server/
-  src/                              # V4，保持不动
-  migrations/                       # V4，保持不动
-  workers/
-    mod-api-v5/
-      package.json
-      package-lock.json
-      tsconfig.json
-      vitest.config.ts
-      wrangler.toml
-      migrations/
-        0001_v5_initial.sql
-      docs/
-        api-reference.md
-      src/
-        index.ts                     # fetch/scheduled entrypoints
-        env.ts                       # V5 bindings/secrets 唯一声明处
-        http/
-          router.ts
-          auth.ts
-          errors.ts
-          json.ts
-          request.ts
-        modules/
-          bundleIngest.ts
-          bundleCollection.ts
-          ghostBattleDiscovery.ts
-          bazaardbDelivery.ts
-          maintenance.ts
-        bundle/
-          prefix.ts
-          manifest.ts
-          streamValidator.ts
-          projection.ts
-        storage/
-          bundleObject.ts
-          bundleIndex.ts
-          deliveryStore.ts
-        r2/
-          presigner.ts
-        observability.ts
-      test/
-        contract/
-        integration/
-        fixtures/
+bazaarplusplus-server-v5/
+  package.json
+  package-lock.json
+  tsconfig.json
+  vitest.config.ts
+  wrangler.toml
+  contracts/v5/                    # prefix、manifest schema、versions、golden vectors
+  migrations/0001_v5_initial.sql  # single clean V5 schema
+  docs/
+    api-reference.md
+    deployment-runbook.md
+  src/
+    index.ts                       # fetch entrypoint 与显式 route table
+    env.ts                         # V5 bindings/secrets 唯一声明处
+    bundle/                        # prefix、manifest、stream validator
+    http/                          # auth、errors、JSON/request helpers
+    modules/                       # ingest、collection、ghost、delivery
+    r2/presigner.ts
+    observability.ts
+  test/                            # Workers integration、fixtures、schema 与 query plans
 ```
 
 不建立 `controller → service → repository` 的逐层转发结构。HTTP route 只负责协议解析和 response 映射；复杂行为集中在以下四个深模块：
 
 ```ts
-interface BundleIngest {
-  accept(input: BundleUploadInput): Promise<BundleReceipt>;
-}
-
-interface BundleCollection {
-  listWindow(input: BundleWindowInput): Promise<BundleWindowPage>;
-}
-
-interface GhostBattleDiscovery {
-  discover(input: GhostBattleQuery): Promise<GhostBattlePage>;
-}
-
-interface BazaarDbDelivery {
-  claim(input: ClaimInput): Promise<ClaimResult>;
-  settle(input: SettleInput): Promise<SettleResult>;
-}
+ingestBundle(request, env, requestId) -> BundleReceipt
+collectBundles(request, env, requestId) -> BundleWindowPage
+discoverGhostBattles(request, env, requestId) -> GhostBattlePage
+claimDeliveries(request, env, requestId) -> ClaimResult
+settleDeliveries(request, env, requestId) -> SettleResult
 ```
 
 每个模块的 interface 同时是 caller 和测试使用的 seam。D1 与 R2 binding 直接作为模块内部依赖，不再包一层只有同名 CRUD 方法的浅接口。真正变化的 presigner、clock、ID generator 和 rate limiter 使用 production adapter 与 test adapter。
@@ -289,6 +252,8 @@ response 200：
 
 ## 5. `POST /bundles`
 
+Bundle fixed prefix 是 16 bytes：ASCII `BPPBNDL5`、u32 big-endian Bundle version、u32 big-endian manifest UTF-8 byte length。manifest 后依次是 Run 与可选 Screenshot；segment offset 相对第一个 payload byte。
+
 ### 5.1 Request
 
 ```http
@@ -340,7 +305,7 @@ Content-Digest: sha-256=:<base64-encoded 32-byte SHA-256>:
   - 有 Screenshot：`created | existing`
   - 无 Screenshot：`not_applicable`
 
-`stored` 也包括“R2 orphan 已存在、校验通过、本次补齐 D1”的情况。response 不返回 `object_key`，避免 caller 把存储布局当成上传 interface。
+`stored` 也包括“同一上传重试发现 R2 object 已存在、完整校验通过并补齐 D1”的情况。response 不返回 `object_key`，避免 caller 把存储布局当成上传 interface。
 
 ### 5.3 Errors
 
@@ -379,7 +344,7 @@ Content-Digest: sha-256=:<base64-encoded 32-byte SHA-256>:
 
 ### 5.4 Ingest 执行顺序
 
-`BundleIngest.accept()` 隐藏完整 ingest 状态机：
+`ingestBundle()` 隐藏完整 ingest 状态机：
 
 1. route 校验 Content-Type、Content-Length、Content-Digest；
 2. 有界读取 fixed prefix 与 manifest，只缓冲这两部分；
@@ -408,7 +373,7 @@ Content-Digest: sha-256=:<base64-encoded 32-byte SHA-256>:
 R2 条件 PUT 失败时返回 `null`，表示 key 已存在。此时不得覆盖对象：
 
 - 读取既有 object 并用同一个 Bundle validator 完整校验；
-- digest 相同且合法：把它作为 orphan recovery，继续 D1 commit；
+- digest 相同且合法：把它作为同一上传的 retry recovery，继续 D1 commit；
 - digest 不同：409 `bundle_id_conflict`；
 - object 不合法：记录 critical alert，返回 503，不自动覆盖证据。
 
@@ -416,7 +381,7 @@ R2 条件 PUT 失败时返回 `null`，表示 key 已存在。此时不得覆盖
 
 - 本次新建 R2 object 后发现 body / segment digest 非法：删除本次 object，不写 D1；
 - 本次新建 object 后出现确定性的 `run_already_bundled`：删除本次 object；
-- R2 已成功但 D1 发生未知或临时错误：保留 orphan，返回 503，由重试或 reconciler 补写；
+- R2 已成功但 D1 发生未知或临时错误：保留 object，返回 503；客户端必须用相同 Bundle 重试，重试会完整校验既有 object 后补写 D1；
 - D1 已成功但 response 丢失：重试走 duplicate；
 - 任何清理只能针对本次条件 PUT 明确创建的 key；不能删除“key 已存在”分支的 object。
 
@@ -784,7 +749,7 @@ delivery 主表只保存当前状态，不用 `last_claim_id + last_outcome` 覆
 - Bundle 进入第二或第三次 claim 后，第一 claim 的重复 settle 仍能识别为 duplicate；
 - 第一 claim 的迟到首次 settle 不会覆盖新的 active claim；
 - 相同 attempt 改 outcome 会得到 `outcome_conflict`；
-- idempotency 保留到 delivery row 的 30 天 D1 TTL，而不是只保留“最近一次结果”。
+- idempotency receipt 随 delivery row 保留，直到 operator 执行显式 D1 清理，而不是只保留“最近一次结果”。
 
 ### 9.5 Request-level errors
 
@@ -838,7 +803,10 @@ CREATE TABLE bundles (
   run_id                  TEXT NOT NULL UNIQUE,
   uploader_account_id     TEXT NOT NULL,
   object_key              TEXT NOT NULL UNIQUE,
-  bundle_sha256           TEXT NOT NULL CHECK (length(bundle_sha256) = 64),
+  bundle_sha256           TEXT NOT NULL CHECK (
+    length(bundle_sha256) = 64
+    AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   bundle_version          INTEGER NOT NULL CHECK (bundle_version = 5),
   manifest_bytes          INTEGER NOT NULL CHECK (manifest_bytes BETWEEN 1 AND 2097152),
   object_bytes            INTEGER NOT NULL CHECK (object_bytes BETWEEN 1 AND 8388607),
@@ -848,7 +816,10 @@ CREATE TABLE bundles (
 
   run_format_version      INTEGER NOT NULL CHECK (run_format_version = 5),
   run_bytes               INTEGER NOT NULL CHECK (run_bytes BETWEEN 1 AND 2097151),
-  run_sha256              TEXT NOT NULL CHECK (length(run_sha256) = 64),
+  run_sha256              TEXT NOT NULL CHECK (
+    length(run_sha256) = 64
+    AND run_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
 
   has_screenshot          INTEGER NOT NULL CHECK (has_screenshot IN (0, 1)),
   screenshot_content_type TEXT,
@@ -871,12 +842,16 @@ CREATE TABLE bundles (
       AND screenshot_bytes BETWEEN 1 AND 1048576
       AND screenshot_sha256 IS NOT NULL
       AND length(screenshot_sha256) = 64
+      AND screenshot_sha256 NOT GLOB '*[^0-9a-f]*'
     )
   )
 );
 
 CREATE INDEX idx_bundles_available
   ON bundles(available_at_ms, bundle_id, object_key);
+
+CREATE INDEX idx_bundles_stored_retention
+  ON bundles(stored_at_ms, bundle_id);
 
 CREATE TABLE ghost_battles (
   uploader_account_id  TEXT NOT NULL,
@@ -892,9 +867,6 @@ CREATE TABLE ghost_battles (
 CREATE INDEX idx_ghost_battles_query
   ON ghost_battles(opponent_account_id, recorded_at_ms DESC, battle_id DESC);
 
-CREATE INDEX idx_ghost_battles_ttl
-  ON ghost_battles(recorded_at_ms, uploader_account_id, battle_id);
-
 CREATE TABLE bundle_uploaders (
   player_account_id  TEXT PRIMARY KEY,
   first_bundle_at_ms INTEGER NOT NULL
@@ -905,6 +877,13 @@ CREATE TABLE bazaardb_deliveries (
   delivery_state      TEXT NOT NULL DEFAULT 'pending'
     CHECK (delivery_state IN ('pending', 'done', 'failed')),
   active_claim_id     TEXT,
+  active_claim_order  INTEGER CHECK (
+    active_claim_order IS NULL
+    OR (
+      typeof(active_claim_order) = 'integer'
+      AND active_claim_order BETWEEN 0 AND 49
+    )
+  ),
   claimable_at_ms     INTEGER NOT NULL,
   delivery_attempts   INTEGER NOT NULL DEFAULT 0
     CHECK (delivery_attempts BETWEEN 0 AND 3),
@@ -913,7 +892,14 @@ CREATE TABLE bazaardb_deliveries (
   delivered_at_ms     INTEGER,
   failed_at_ms        INTEGER,
   failure_reason      TEXT,
-  CHECK (active_claim_id IS NULL OR delivery_state = 'pending'),
+  CHECK (
+    (active_claim_id IS NULL AND active_claim_order IS NULL)
+    OR (
+      active_claim_id IS NOT NULL
+      AND active_claim_order IS NOT NULL
+      AND delivery_state = 'pending'
+    )
+  ),
   CHECK (
     (
       delivery_state = 'pending'
@@ -942,6 +928,10 @@ CREATE INDEX idx_bazaardb_claimable
 
 CREATE INDEX idx_bazaardb_active_claim
   ON bazaardb_deliveries(active_claim_id, bundle_id)
+  WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
+
+CREATE INDEX idx_bazaardb_active_claim_order
+  ON bazaardb_deliveries(active_claim_id, active_claim_order, bundle_id)
   WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
 
 CREATE INDEX idx_bazaardb_exhausted_lease
@@ -978,13 +968,6 @@ CREATE TABLE bazaardb_delivery_attempts (
   )
 ) WITHOUT ROWID;
 
-CREATE TABLE maintenance_state (
-  job_name      TEXT PRIMARY KEY,
-  cursor_json   TEXT,
-  last_start_ms INTEGER,
-  last_ok_ms    INTEGER,
-  last_error    TEXT
-) WITHOUT ROWID;
 ```
 
 不存 `run_projection_json`：当前 server 没有 Run facts query，analyzer 直接下载 Bundle。Ghost 所需 projection 只存于 `ghost_battles.projection_json`。`ghost_battles` 是可从 Bundle manifest 重建的查询投影，不是 Battle 权威数据；R2 Bundle 才是权威数据。
@@ -992,6 +975,8 @@ CREATE TABLE maintenance_state (
 `bundle_uploaders` 只记录 V5 成功提交的 Bundle uploader。新 D1 部署时为空，不从 V4 `seen_player_accounts` 导入；`first_bundle_at_ms` 使用 server time。后续 Bundle 使用 `ON CONFLICT DO NOTHING`，不为维护未被查询的 last-seen 时间产生额外 row write。
 
 `bundle_sha256`、`run_sha256`、`screenshot_sha256` 在 D1 和 JSON response 中统一为 64 字符 lowercase hex；HTTP `Content-Digest` 的 base64 值在 request parsing 时转换一次。
+
+`0001_v5_initial.sql` 直接包含 Screenshot NULL 完整性、lowercase hex digest、`idx_bundles_stored_retention`、active claim 稳定顺序字段及对应 partial index。V5 使用单一、干净的 initial schema。
 
 ---
 
@@ -1093,42 +1078,20 @@ RETURNING bundle_id, delivery_attempts;
 | ghost query | `idx_ghost_battles_query` + `bundles` primary key join |
 | claim candidates | `idx_bazaardb_claimable` |
 | active settle | `idx_bazaardb_active_claim` |
+| active claim response order | `idx_bazaardb_active_claim_order` |
 | settle receipt / idempotency | `bazaardb_delivery_attempts` primary key |
 | attempt number uniqueness | `bazaardb_delivery_attempts(bundle_id, attempt_number)` unique index |
+| claim-time Bundle expiry | `idx_bundles_stored_retention` |
 
 每个目标 query 都要有 `EXPLAIN QUERY PLAN` test；测试断言目标 index 名称与“不使用 TEMP B-TREE 排序”等关键 plan 属性，不断言完整 plan 文本。
 
 ---
 
-## 13. Scheduled maintenance
+## 13. Retention and manual maintenance
 
-`scheduled()` 调用单一 `Maintenance.run()` 模块。每个 job 有独立日志、预算和 `maintenance_state` heartbeat；一个 job 失败不能阻止后续 job 尝试。
+R2 14 天 lifecycle 完全由 Cloudflare bucket rule 管理。Worker 只导出 `fetch`，没有 cron、`scheduled()`、R2 reconciler 或自动 D1 deletion。Ghost 的 5 天窗口和 Bundle collection 的 14 天窗口只限制 API 可见性，不删除 D1 rows；D1 清理由 operator 在独立维护流程中显式执行。
 
-### 13.1 Orphan reconcile
-
-- 分页 LIST `bundles/`，cursor 写 `maintenance_state`；不能只扫 server 当前日期，因为离线补传的 Bundle key 可能使用更早的 manifest date；
-- 对 R2 有、D1 无的 object 使用同一个 Bundle validator 完整 GET/校验；
-- 合法 object 重放 D1 commit，`available_at_ms` 使用恢复 commit 的 server time；
-- 非法 object 不自动覆盖或删除，记录 object key、reason 与 critical alert；
-- D1 有、R2 无且仍在 14 天 retention window 内时告警，不伪造新 object；
-- 正常 ingest 与 reconciler 共用 `BundleIngest.commitValidatedDescriptor()`，避免两套 projection 逻辑。
-
-### 13.2 Delivery maintenance
-
-- pending delivery 已完成 3 次且最后 lease 过期：标记 failed `delivery_attempts_exhausted`；
-- pending delivery 的 Bundle 已越过 14 天 object retention：标记 failed `bundle_expired`；
-- 不删除 done/failed Bundle object；R2 lifecycle 统一处理。
-
-### 13.3 D1 TTL
-
-按小批量循环删除：
-
-- `ghost_battles.recorded_at_ms < now - 7 days`；
-- `bundles.available_at_ms < now - 30 days`，其 deliveries 必须已经 terminal；
-- Bundle 删除通过 FK cascade 删除 delivery attempts；
-- 每批限制 rows 与执行时间，达到单次 cron 预算后保存进度，下次继续。
-
-R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist 验证；Worker 不逐 object 模拟 lifecycle。
+R2 PUT 成功而 D1 commit 失败时，客户端收到 retryable 503；相同 Bundle 的幂等重试验证既有 object、保留真实 R2 upload time 并补写 D1。`claim` 在选取候选前惰性标记越过 R2 retention 的 pending Bundle 和租约已过期的第三次 attempt。
 
 ---
 
@@ -1139,7 +1102,7 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 | header / manifest reject | 无 R2、无 D1 | client permanent failure |
 | R2 PUT 失败 | 无 D1 | client retry |
 | stream validation 失败 | 删除本次 R2、无 D1 | client permanent failure |
-| R2 成功、D1 失败 | R2 orphan | client retry或 reconciler |
+| R2 成功、D1 失败 | R2-only object | client 以相同 Bundle 重试；14 天内未重试则由 R2 lifecycle 删除 |
 | D1 成功、response 丢失 | 完整 stored | retry 返回 duplicate |
 | collection response 丢失 | server 无状态 | caller 重放同 window/page |
 | ghost presign 失败 | D1 不变 | 整个 route 503 |
@@ -1148,7 +1111,7 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 | settle transaction 失败 | 无部分状态变化 | caller 重试同 settle |
 | settle response 丢失 | receipt 已保存 | retry 返回 duplicate |
 | BazaarDB download 失败 | delivery 仍 leased | settle retryable或等待 lease 过期 |
-| R2 object 提前缺失 | signed GET 返回 S3 error | BazaarDB settle failure + reconciler alert |
+| R2 object 提前缺失 | signed GET 返回 S3 error | consumer retry/失败上报；Worker 不代理或重建 object |
 
 所有可重试写入都由 `bundle_id` 或 `(claim_id, bundle_id)` 提供幂等身份，不能依赖单个 Worker isolate 的内存状态。
 
@@ -1166,8 +1129,6 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 | `ghost.discovery` | request_id, account_hash, row_count, limited, d1_ms, presign_ms |
 | `bazaardb.claim` | request_id, claim_id, item_count, lease_ms, d1_ms, presign_ms |
 | `bazaardb.settle` | request_id, claim_id, applied, duplicate, rejected, d1_ms |
-| `maintenance.reconcile` | scanned, restored, invalid, missing, cursor, duration_ms |
-| `maintenance.ttl` | table, deleted, cutoff_ms, duration_ms |
 
 `player_account_id` 在公开 route 日志中只写稳定 hash，不写原值。可以记录 `bundle_id`、`run_id`、`claim_id` 和 object key，但不能记录：
 
@@ -1182,11 +1143,10 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 
 - ingest 5xx / 503 rate；
 - `bundle_id_conflict` 异常增长；
-- R2 orphan 数量与最老年龄；
 - analyzer sync last-success；
 - pending delivery 最老年龄与 attempts-exhausted 数量；
 - presigner failure；
-- maintenance heartbeat 缺失；
+- D1 size 与 operator-defined retention backlog；
 - ghost 429 rate。
 
 ---
@@ -1223,7 +1183,7 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 
 - 首次 stored、相同 digest duplicate、bundle conflict、run conflict；
 - R2 conditional PUT race；
-- R2 orphan recovery；
+- R2-only object 通过相同上传重试恢复；
 - D1 failure 后 object 保留；
 - invalid stream 后只删除本次创建的 object；
 - 双方上传同一 battle 保留两个方向；
@@ -1257,20 +1217,17 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 
 ---
 
-## 17. 实现顺序
+## 17. 模块组成
 
-1. 建立 `workers/mod-api-v5` 独立 package、wrangler、Env、router 和统一错误 contract。
-2. 提交 `contracts/v5` Bundle prefix/manifest validator 与 golden fixtures。
-3. 建立 `0001_v5_initial.sql` 和 schema / query-plan tests。
-4. 实现固定 R2 presigner production/test adapters。
-5. 实现 Bundle streaming validator、conditional R2 PUT、D1 commit 与 orphan recovery。
-6. 实现 Analyzer Bundle collection 与 keyset tests。
-7. 实现 Ghost discovery、projection mapping 与 rate limiter tests。
-8. 实现 BazaarDB claim、attempt receipts、settle state machine 与并发 tests。
-9. 实现 scheduled reconciler、delivery maintenance、TTL 和 heartbeat。
-10. 生成 `workers/mod-api-v5/docs/api-reference.md`；其 wire 内容必须与本文第 3～9 节逐字段一致。
-11. 创建独立 Cloudflare resources、secrets、read-only R2 credentials 和 lifecycle rule。
-12. 通过 synthetic upload → collection / ghost / claim → direct R2 GET → settle 的生产 smoke test 后，再允许 mod V5 发布。
+1. 根 package：wrangler、Env、显式 route table、统一 JSON/error contract。
+2. `contracts/v5`：Bundle prefix、manifest schema、versions 与 golden fixtures。
+3. `migrations/0001_v5_initial.sql`：完整初始 schema、约束、retention/claim indexes 与 query-plan tests。
+4. `src/r2/presigner.ts`：固定 bucket、GET method、S3 endpoint 与 7 天 TTL。
+5. Bundle ingest：bounded manifest、streaming digest、conditional R2 PUT、D1 logical commit 与 R2-only retry recovery。
+6. Analyzer collection：固定窗口、显式 keyset、covering index 与稳定排序。
+7. Ghost discovery：projection eligibility、5 天窗口、200 上限、rate limiting 与 URL memoization。
+8. BazaarDB delivery：claim/settle、attempt receipts、lease、backoff、并发与跨 attempt 幂等。
+9. `docs/api-reference.md` 与 `docs/deployment-runbook.md`：实际 wire contract、外部 provisioning、smoke steps 与人工 D1 maintenance 边界。
 
 ---
 
@@ -1290,7 +1247,7 @@ R2 14 天 lifecycle 在 Cloudflare 配置中管理，并由 deployment checklist
 - D1 schema 中没有 installation、download token、Run object、Screenshot object 或 Pack table。
 - `EXPLAIN QUERY PLAN` 证明 collection、ghost、claim 和 settle 使用预期索引。
 - 日志、错误和 traces 不包含 token、secret、Screenshot、Bundle body 或完整 presigned URL。
-- R2 orphan、过期 delivery、D1 TTL 和 maintenance heartbeat 都有可测试恢复路径。
+- R2-only object 的上传重试和 claim-time delivery 过期都有 integration test；Worker 没有 scheduled export 或 cron trigger。
 
 ---
 

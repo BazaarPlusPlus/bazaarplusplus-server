@@ -1,8 +1,19 @@
 # BazaarPlusPlus Server V5
 
-Standalone Cloudflare Worker for the BPP V5 Bundle pipeline.
+Standalone Cloudflare Worker for the BazaarPlusPlus V5 Bundle pipeline. It uses an independent Worker, D1 database, R2 bucket, migration lineage, and wire contract.
 
-V5 uses a fresh Worker, D1 database, R2 bucket, migrations, and wire contract. The V4 implementation remains on the repository's `master` worktree for reference and production drain; V5 does not import V4 source code.
+One immutable Bundle contains exactly one Run and zero or one Screenshot. The Worker never decompresses Run payloads and never proxies Bundle downloads.
+
+## Interfaces
+
+- `GET /health`: liveness;
+- `POST /bundles`: public streaming Bundle ingest;
+- `GET /bundles`: token-protected analyzer time-window sync;
+- `GET /ghost-battles`: public five-day Ghost discovery with per-IP rate limiting;
+- `POST /bazaardb/deliveries/claim`: token-protected ten-minute delivery leases;
+- `POST /bazaardb/deliveries/settle`: idempotent per-attempt delivery settlement.
+
+Discovery returns seven-day R2 SigV4 `GetObject` URLs. R2 lifecycle retention is 14 days. An R2-only object left by a failed D1 commit is recovered only by an idempotent client upload retry; otherwise the bucket lifecycle expires it. The Worker exports no scheduled handler and performs no automatic D1 cleanup; D1 maintenance is an operator action. The complete interface is documented in [docs/api-reference.md](docs/api-reference.md), and the Bundle contract and golden vectors are in [contracts/v5](contracts/v5).
 
 ## Local development
 
@@ -13,13 +24,18 @@ npm test
 npm run dev
 ```
 
-The checked-in D1 database ID and R2 presign configuration are non-production placeholders. Create the V5 Cloudflare resources and configure secrets before deployment.
+Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations and R2 bindings. `npm run check` type-checks production and test code.
 
-## Current implementation
+## Production configuration
 
-- independent V5 package and Wrangler configuration;
-- liveness route and canonical JSON errors;
-- initial V5 D1 schema and maintenance indexes;
-- `MAX_BATTLES_PER_BUNDLE = 30`.
+`src/env.ts` is the sole binding declaration. Wrangler provides:
 
-Bundle ingest, collection, Ghost Battle discovery, R2 presigning, BazaarDB delivery, and maintenance handlers are intentionally not implemented in this foundation slice.
+- `DB`: `bazaarplusplus-mod-api-v5-db`;
+- `BUNDLE_BUCKET`: `bazaarplusplus-bundle-v5`;
+- `GHOST_BATTLE_RATE_LIMITER`: 60 calls per 60 seconds;
+- `BUNDLE_BUCKET_NAME`, `R2_ACCOUNT_ID`, and `R2_PRESIGN_ACCESS_KEY_ID` vars;
+- `R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, and `BAZAARDB_DELIVERY_TOKEN` secrets.
+
+The two service tokens are distinct 32-byte random values encoded as 43-character unpadded base64url strings. The R2 S3 credential grants Object Read only on the V5 bucket.
+
+The checked-in D1 database ID and presign values are placeholders. Provisioning, migration, lifecycle, deploy, and smoke-test commands are in [docs/deployment-runbook.md](docs/deployment-runbook.md). They require explicit Cloudflare deployment authorization.

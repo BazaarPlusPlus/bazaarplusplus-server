@@ -1,0 +1,382 @@
+import { validBundleId } from "../bundle/manifest";
+import {
+  CLAIM_DEFAULT_LIMIT,
+  CLAIM_LEASE_MS,
+  CLAIM_MAX_LIMIT,
+  R2_RETENTION_MS,
+  SETTLE_MAX_RESULTS,
+} from "../domain/limits";
+import type { Env } from "../env";
+import { HttpError } from "../http/errors";
+import { readJsonObject } from "../http/request";
+import { logEvent } from "../observability";
+import { createBundleDownloadSigner } from "../r2/presigner";
+
+interface ClaimRow {
+  bundle_id: string;
+  run_id: string;
+  object_key: string;
+  bundle_sha256: string;
+}
+
+type SettleOutcome = "accepted" | "retryable_failure" | "permanent_failure";
+
+interface SettleInput {
+  bundleId: string;
+  outcome: SettleOutcome;
+  reason: string | null;
+}
+
+interface ReceiptRow {
+  claim_id: string | null;
+  bundle_id: string | null;
+  outcome: SettleOutcome | null;
+  reason: string | null;
+  delivery_state: "pending" | "done" | "failed" | null;
+  active_claim_id: string | null;
+  claimable_at_ms: number | null;
+}
+
+function claimLimit(value: unknown): number {
+  if (value === undefined) return CLAIM_DEFAULT_LIMIT;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > CLAIM_MAX_LIMIT) {
+    throw new HttpError(400, "invalid_limit", "limit must be an integer between 1 and 50", false);
+  }
+  return value as number;
+}
+
+async function compensateClaim(env: Env, claimId: string, now: number): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM bazaardb_delivery_attempts WHERE claim_id = ?1`).bind(claimId),
+    env.DB.prepare(
+      `UPDATE bazaardb_deliveries
+       SET active_claim_id = NULL,
+           active_claim_order = NULL,
+           claimable_at_ms = ?2,
+           delivery_attempts = delivery_attempts - 1,
+           state_updated_at_ms = ?2
+       WHERE active_claim_id = ?1
+         AND delivery_state = 'pending'`,
+    ).bind(claimId, now),
+  ]);
+}
+
+export async function claimDeliveries(
+  request: Request,
+  env: Env,
+  requestId: string,
+): Promise<Record<string, unknown>> {
+  const body = await readJsonObject(request);
+  const limit = claimLimit(body.limit);
+  const signer = createBundleDownloadSigner(env);
+  const now = Date.now();
+  const expiresAt = now + CLAIM_LEASE_MS;
+  const claimId = `clm_${crypto.randomUUID()}`;
+  let rows: ClaimRow[];
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries
+         SET delivery_state = 'failed',
+             active_claim_id = NULL,
+             active_claim_order = NULL,
+             state_updated_at_ms = ?1,
+             failed_at_ms = ?1,
+             failure_reason = 'bundle_expired'
+         WHERE delivery_state = 'pending'
+           AND bundle_id IN (
+             SELECT bundle_id
+             FROM bundles INDEXED BY idx_bundles_stored_retention
+             WHERE stored_at_ms < ?2
+           )`,
+      ).bind(now, now - R2_RETENTION_MS),
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries
+         SET delivery_state = 'failed',
+             active_claim_id = NULL,
+             active_claim_order = NULL,
+             state_updated_at_ms = ?1,
+             failed_at_ms = ?1,
+             failure_reason = 'delivery_attempts_exhausted'
+         WHERE bundle_id IN (
+           SELECT bundle_id
+           FROM bazaardb_deliveries INDEXED BY idx_bazaardb_exhausted_lease
+           WHERE delivery_state = 'pending'
+             AND delivery_attempts = 3
+             AND active_claim_id IS NOT NULL
+             AND claimable_at_ms <= ?1
+         )`,
+      ).bind(now),
+      env.DB.prepare(
+        `WITH candidates AS MATERIALIZED (
+           SELECT
+             bundle_id,
+             ROW_NUMBER() OVER (
+               ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
+             ) - 1 AS claim_order
+           FROM bazaardb_deliveries INDEXED BY idx_bazaardb_claimable
+           WHERE delivery_state = 'pending'
+             AND delivery_attempts < 3
+             AND claimable_at_ms <= ?1
+           ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
+           LIMIT ?4
+         )
+         UPDATE bazaardb_deliveries
+         SET active_claim_id = ?2,
+             active_claim_order = (
+               SELECT claim_order FROM candidates
+               WHERE candidates.bundle_id = bazaardb_deliveries.bundle_id
+             ),
+             claimable_at_ms = ?3,
+             delivery_attempts = delivery_attempts + 1,
+             state_updated_at_ms = ?1
+         WHERE bundle_id IN (SELECT bundle_id FROM candidates)
+           AND delivery_state = 'pending'
+           AND delivery_attempts < 3
+           AND claimable_at_ms <= ?1
+         RETURNING bundle_id, delivery_attempts`,
+      ).bind(now, claimId, expiresAt, limit),
+      env.DB.prepare(
+        `INSERT INTO bazaardb_delivery_attempts (
+           claim_id, bundle_id, attempt_number, claimed_at_ms, expires_at_ms
+         )
+         SELECT ?1, bundle_id, delivery_attempts, ?2, ?3
+         FROM bazaardb_deliveries
+         WHERE active_claim_id = ?1
+           AND delivery_state = 'pending'`,
+      ).bind(claimId, now, expiresAt),
+      env.DB.prepare(
+        `SELECT b.bundle_id, b.run_id, b.object_key, b.bundle_sha256
+         FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_active_claim_order
+         JOIN bundles AS b ON b.bundle_id = d.bundle_id
+         WHERE d.active_claim_id = ?1
+           AND d.delivery_state = 'pending'
+         ORDER BY d.active_claim_order ASC, d.bundle_id ASC`,
+      ).bind(claimId),
+    ]);
+    rows = (results[4].results ?? []) as unknown as ClaimRow[];
+  } catch {
+    throw new HttpError(503, "storage_unavailable", "BazaarDB claim transaction failed", true);
+  }
+
+  if (rows.length === 0) {
+    return { claim_id: null, expires_at_ms: null, items: [] };
+  }
+  try {
+    const items = await Promise.all(
+      rows.map(async (row) => {
+        const signed = await signer.sign(row.object_key, now);
+        return {
+          bundle_id: row.bundle_id,
+          run_id: row.run_id,
+          download_url: signed.url,
+          download_expires_at_ms: signed.expiresAtMs,
+          content_type: "application/x-bpp-bundle-v5",
+          sha256: row.bundle_sha256,
+        };
+      }),
+    );
+    logEvent("bazaardb.claim", {
+      request_id: requestId,
+      claim_id: claimId,
+      item_count: items.length,
+      lease_ms: CLAIM_LEASE_MS,
+    });
+    return { claim_id: claimId, expires_at_ms: expiresAt, items };
+  } catch {
+    await compensateClaim(env, claimId, now).catch(() => undefined);
+    throw new HttpError(503, "storage_unavailable", "BazaarDB claim URL signing failed", true);
+  }
+}
+
+function parseSettle(body: Record<string, unknown>): { claimId: string; results: SettleInput[] } {
+  if (typeof body.claim_id !== "string" || !/^clm_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.claim_id)) {
+    throw new HttpError(400, "invalid_settle_request", "claim_id is invalid", false);
+  }
+  if (!Array.isArray(body.results) || body.results.length < 1 || body.results.length > SETTLE_MAX_RESULTS) {
+    throw new HttpError(400, "invalid_settle_request", "results must contain 1 to 50 items", false);
+  }
+  const bundleIds = new Set<string>();
+  const results = body.results.map((value): SettleInput => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new HttpError(400, "invalid_settle_request", "Settle result must be an object", false);
+    }
+    const source = value as Record<string, unknown>;
+    if (typeof source.bundle_id !== "string" || !validBundleId(source.bundle_id)) {
+      throw new HttpError(400, "invalid_settle_request", "Settle bundle_id is invalid", false);
+    }
+    if (bundleIds.has(source.bundle_id)) {
+      throw new HttpError(400, "invalid_settle_request", "Settle bundle_id values must be unique", false);
+    }
+    bundleIds.add(source.bundle_id);
+    if (
+      source.outcome !== "accepted" &&
+      source.outcome !== "retryable_failure" &&
+      source.outcome !== "permanent_failure"
+    ) {
+      throw new HttpError(400, "invalid_settle_request", "Settle outcome is invalid", false);
+    }
+    const reason = source.reason;
+    if (source.outcome === "accepted") {
+      if (reason !== undefined) {
+        throw new HttpError(400, "invalid_settle_request", "accepted must not include reason", false);
+      }
+      return { bundleId: source.bundle_id, outcome: source.outcome, reason: null };
+    }
+    if (typeof reason !== "string" || !/^[a-z0-9_]{1,64}$/.test(reason)) {
+      throw new HttpError(400, "invalid_settle_request", "Failure reason is invalid", false);
+    }
+    return { bundleId: source.bundle_id, outcome: source.outcome, reason };
+  });
+  return { claimId: body.claim_id, results };
+}
+
+export async function settleDeliveries(
+  request: Request,
+  env: Env,
+  requestId: string,
+): Promise<Record<string, unknown>> {
+  const input = parseSettle(await readJsonObject(request));
+  const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
+  for (const result of input.results) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE bazaardb_delivery_attempts
+         SET settled_at_ms = ?4,
+             outcome = ?3,
+             reason = ?5
+         WHERE claim_id = ?1
+           AND bundle_id = ?2
+           AND outcome IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM bazaardb_deliveries AS d
+             WHERE d.bundle_id = ?2
+               AND d.delivery_state = 'pending'
+               AND d.active_claim_id = ?1
+               AND d.claimable_at_ms > ?4
+           )`,
+      ).bind(input.claimId, result.bundleId, result.outcome, now, result.reason),
+      env.DB.prepare(
+        `UPDATE bazaardb_deliveries
+         SET delivery_state = CASE
+               WHEN ?3 = 'accepted' THEN 'done'
+               WHEN ?3 = 'permanent_failure' THEN 'failed'
+               WHEN delivery_attempts >= 3 THEN 'failed'
+               ELSE 'pending'
+             END,
+             active_claim_id = NULL,
+             active_claim_order = NULL,
+             claimable_at_ms = CASE
+               WHEN ?3 = 'retryable_failure' AND delivery_attempts = 1 THEN ?4 + 60000
+               WHEN ?3 = 'retryable_failure' AND delivery_attempts = 2 THEN ?4 + 300000
+               ELSE claimable_at_ms
+             END,
+             state_updated_at_ms = ?4,
+             delivered_at_ms = CASE WHEN ?3 = 'accepted' THEN ?4 ELSE NULL END,
+             failed_at_ms = CASE
+               WHEN ?3 = 'permanent_failure' OR (?3 = 'retryable_failure' AND delivery_attempts >= 3)
+                 THEN ?4
+               ELSE NULL
+             END,
+             failure_reason = CASE
+               WHEN ?3 = 'permanent_failure' THEN ?5
+               WHEN ?3 = 'retryable_failure' AND delivery_attempts >= 3
+                 THEN 'delivery_attempts_exhausted'
+               ELSE NULL
+             END
+         WHERE bundle_id = ?2
+           AND delivery_state = 'pending'
+           AND active_claim_id = ?1
+           AND claimable_at_ms > ?4
+           AND EXISTS (
+             SELECT 1 FROM bazaardb_delivery_attempts AS a
+             WHERE a.claim_id = ?1
+               AND a.bundle_id = ?2
+               AND a.outcome = ?3
+               AND a.settled_at_ms = ?4
+               AND (a.reason = ?5 OR (a.reason IS NULL AND ?5 IS NULL))
+           )`,
+      ).bind(input.claimId, result.bundleId, result.outcome, now, result.reason),
+    );
+  }
+
+  let writes: D1Result<unknown>[];
+  let receipts: ReceiptRow[];
+  try {
+    writes = await env.DB.batch(statements);
+    const queries = input.results.map((result) =>
+      env.DB.prepare(
+        `SELECT
+           a.claim_id,
+           a.bundle_id,
+           a.outcome,
+           a.reason,
+           d.delivery_state,
+           d.active_claim_id,
+           d.claimable_at_ms
+         FROM bazaardb_delivery_attempts AS a
+         JOIN bazaardb_deliveries AS d ON d.bundle_id = a.bundle_id
+         WHERE a.claim_id = ?1 AND a.bundle_id = ?2`,
+      ).bind(input.claimId, result.bundleId),
+    );
+    const found = await env.DB.batch<ReceiptRow>(queries);
+    receipts = found.map((result) => (result.results?.[0] as ReceiptRow | undefined) ?? {
+      claim_id: null,
+      bundle_id: null,
+      outcome: null,
+      reason: null,
+      delivery_state: null,
+      active_claim_id: null,
+      claimable_at_ms: null,
+    });
+  } catch {
+    throw new HttpError(503, "storage_unavailable", "BazaarDB settle transaction failed", true);
+  }
+
+  let applied = 0;
+  let duplicate = 0;
+  let rejected = 0;
+  const items = input.results.map((result, index) => {
+    const receipt = receipts[index];
+    let status: "applied" | "duplicate" | "stale_claim" | "outcome_conflict" | "unknown_item";
+    if (receipt.claim_id === null) {
+      status = "unknown_item";
+      rejected += 1;
+    } else if (receipt.outcome === null) {
+      status = "stale_claim";
+      rejected += 1;
+    } else if (receipt.outcome !== result.outcome || receipt.reason !== result.reason) {
+      status = "outcome_conflict";
+      rejected += 1;
+    } else if (Number(writes[index * 2 + 1].meta.changes ?? 0) === 1) {
+      status = "applied";
+      applied += 1;
+    } else {
+      status = "duplicate";
+      duplicate += 1;
+    }
+    return {
+      bundle_id: result.bundleId,
+      status,
+      state: receipt.delivery_state,
+      next_claim_at_ms:
+        receipt.delivery_state === "pending" && receipt.active_claim_id === null
+          ? receipt.claimable_at_ms
+          : null,
+    };
+  });
+  logEvent("bazaardb.settle", {
+    request_id: requestId,
+    claim_id: input.claimId,
+    applied,
+    duplicate,
+    rejected,
+  });
+  return {
+    claim_id: input.claimId,
+    items,
+    summary: { applied, duplicate, rejected },
+  };
+}

@@ -5,7 +5,10 @@ CREATE TABLE bundles (
   run_id                  TEXT NOT NULL UNIQUE,
   uploader_account_id     TEXT NOT NULL,
   object_key              TEXT NOT NULL UNIQUE,
-  bundle_sha256           TEXT NOT NULL CHECK (length(bundle_sha256) = 64),
+  bundle_sha256           TEXT NOT NULL CHECK (
+    length(bundle_sha256) = 64
+    AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   bundle_version          INTEGER NOT NULL CHECK (bundle_version = 5),
   manifest_bytes          INTEGER NOT NULL CHECK (manifest_bytes BETWEEN 1 AND 2097152),
   object_bytes            INTEGER NOT NULL CHECK (object_bytes BETWEEN 1 AND 8388607),
@@ -15,7 +18,10 @@ CREATE TABLE bundles (
 
   run_format_version      INTEGER NOT NULL CHECK (run_format_version = 5),
   run_bytes               INTEGER NOT NULL CHECK (run_bytes BETWEEN 1 AND 2097151),
-  run_sha256              TEXT NOT NULL CHECK (length(run_sha256) = 64),
+  run_sha256              TEXT NOT NULL CHECK (
+    length(run_sha256) = 64
+    AND run_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
 
   has_screenshot          INTEGER NOT NULL CHECK (has_screenshot IN (0, 1)),
   screenshot_content_type TEXT,
@@ -32,16 +38,22 @@ CREATE TABLE bundles (
     OR
     (
       has_screenshot = 1
+      AND screenshot_content_type IS NOT NULL
       AND screenshot_content_type IN ('image/jpeg', 'image/webp')
+      AND screenshot_bytes IS NOT NULL
       AND screenshot_bytes BETWEEN 1 AND 1048576
       AND screenshot_sha256 IS NOT NULL
       AND length(screenshot_sha256) = 64
+      AND screenshot_sha256 NOT GLOB '*[^0-9a-f]*'
     )
   )
 );
 
 CREATE INDEX idx_bundles_available
   ON bundles(available_at_ms, bundle_id, object_key);
+
+CREATE INDEX idx_bundles_stored_retention
+  ON bundles(stored_at_ms, bundle_id);
 
 CREATE TABLE ghost_battles (
   uploader_account_id TEXT NOT NULL,
@@ -57,9 +69,6 @@ CREATE TABLE ghost_battles (
 CREATE INDEX idx_ghost_battles_query
   ON ghost_battles(opponent_account_id, recorded_at_ms DESC, battle_id DESC);
 
-CREATE INDEX idx_ghost_battles_ttl
-  ON ghost_battles(recorded_at_ms, uploader_account_id, battle_id);
-
 CREATE TABLE bundle_uploaders (
   player_account_id  TEXT PRIMARY KEY,
   first_bundle_at_ms INTEGER NOT NULL
@@ -70,6 +79,13 @@ CREATE TABLE bazaardb_deliveries (
   delivery_state      TEXT NOT NULL DEFAULT 'pending'
     CHECK (delivery_state IN ('pending', 'done', 'failed')),
   active_claim_id     TEXT,
+  active_claim_order  INTEGER CHECK (
+    active_claim_order IS NULL
+    OR (
+      typeof(active_claim_order) = 'integer'
+      AND active_claim_order BETWEEN 0 AND 49
+    )
+  ),
   claimable_at_ms     INTEGER NOT NULL,
   delivery_attempts   INTEGER NOT NULL DEFAULT 0
     CHECK (delivery_attempts BETWEEN 0 AND 3),
@@ -78,7 +94,14 @@ CREATE TABLE bazaardb_deliveries (
   delivered_at_ms     INTEGER,
   failed_at_ms        INTEGER,
   failure_reason      TEXT,
-  CHECK (active_claim_id IS NULL OR delivery_state = 'pending'),
+  CHECK (
+    (active_claim_id IS NULL AND active_claim_order IS NULL)
+    OR (
+      active_claim_id IS NOT NULL
+      AND active_claim_order IS NOT NULL
+      AND delivery_state = 'pending'
+    )
+  ),
   CHECK (
     (
       delivery_state = 'pending'
@@ -107,6 +130,10 @@ CREATE INDEX idx_bazaardb_claimable
 
 CREATE INDEX idx_bazaardb_active_claim
   ON bazaardb_deliveries(active_claim_id, bundle_id)
+  WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
+
+CREATE INDEX idx_bazaardb_active_claim_order
+  ON bazaardb_deliveries(active_claim_id, active_claim_order, bundle_id)
   WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
 
 CREATE INDEX idx_bazaardb_exhausted_lease
@@ -139,12 +166,4 @@ CREATE TABLE bazaardb_delivery_attempts (
       AND reason IS NOT NULL
     )
   )
-) WITHOUT ROWID;
-
-CREATE TABLE maintenance_state (
-  job_name      TEXT PRIMARY KEY,
-  cursor_json   TEXT,
-  last_start_ms INTEGER,
-  last_ok_ms    INTEGER,
-  last_error    TEXT
 ) WITHOUT ROWID;
