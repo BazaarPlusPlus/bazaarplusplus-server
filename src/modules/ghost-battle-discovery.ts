@@ -1,4 +1,5 @@
 import { validAccountId } from "../bundle/manifest";
+import { toHex } from "../bundle/hex";
 import {
   GHOST_DEFAULT_LIMIT,
   GHOST_LOOKBACK_MS,
@@ -33,9 +34,7 @@ async function accountHash(accountId: string): Promise<string> {
   const bytes = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accountId)),
   );
-  return [...bytes.subarray(0, 8)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  return toHex(bytes.subarray(0, 8));
 }
 
 export async function discoverGhostBattles(

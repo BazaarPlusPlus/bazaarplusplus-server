@@ -3,14 +3,9 @@ import { MAX_BUNDLE_BYTES } from "../domain/limits";
 import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logError, logEvent } from "../observability";
-import {
-  validateManifest,
-  type ValidatedBundleDescriptor,
-} from "../bundle/manifest";
-import { BUNDLE_PREFIX_BYTES, parseBundlePrefix } from "../bundle/prefix";
-import { validatedBundleStream } from "../bundle/stream-validator";
-
-const STREAM_CHUNK_BYTES = 64 * 1024;
+import { toHex } from "../bundle/hex";
+import type { ValidatedBundleDescriptor } from "../bundle/manifest";
+import { openBundle, type OpenedBundle } from "../bundle/open";
 
 interface BundleReceipt {
   bundle_id: string;
@@ -24,129 +19,6 @@ interface ExistingBundleRow {
   run_id: string;
   bundle_sha256: string;
   has_screenshot: number;
-}
-
-interface BoundedBodyReader {
-  readExactly(length: number): Promise<Uint8Array>;
-  remainder(): ReadableStream<Uint8Array>;
-  cancel(reason?: unknown): Promise<void>;
-}
-
-function createBodyReader(body: ReadableStream<Uint8Array>): BoundedBodyReader {
-  try {
-    const reader = body.getReader({ mode: "byob" });
-    return {
-      async readExactly(length) {
-        const output = new Uint8Array(length);
-        let offset = 0;
-        while (offset < length) {
-          const requested = new Uint8Array(Math.min(STREAM_CHUNK_BYTES, length - offset));
-          const result = await reader.read(requested);
-          if (result.done || result.value.byteLength === 0) {
-            throw new HttpError(
-              400,
-              "invalid_content_length",
-              "Bundle body ended before Content-Length",
-              false,
-            );
-          }
-          output.set(result.value, offset);
-          offset += result.value.byteLength;
-        }
-        return output;
-      },
-      remainder() {
-        return new ReadableStream<Uint8Array>({
-          async pull(controller) {
-            const result = await reader.read(new Uint8Array(STREAM_CHUNK_BYTES));
-            if (result.done) controller.close();
-            else controller.enqueue(result.value);
-          },
-          async cancel(reason) {
-            await reader.cancel(reason);
-          },
-        });
-      },
-      async cancel(reason) {
-        await reader.cancel(reason);
-      },
-    };
-  } catch {
-    const reader = body.getReader();
-    let pending: Uint8Array | null = null;
-    return {
-      async readExactly(length) {
-        const output = new Uint8Array(length);
-        let offset = 0;
-        while (offset < length) {
-          const result = pending === null ? await reader.read() : { done: false, value: pending };
-          pending = null;
-          if (result.done) {
-            throw new HttpError(
-              400,
-              "invalid_content_length",
-              "Bundle body ended before Content-Length",
-              false,
-            );
-          }
-          const needed = length - offset;
-          output.set(result.value.subarray(0, needed), offset);
-          offset += Math.min(needed, result.value.byteLength);
-          if (result.value.byteLength > needed) pending = result.value.subarray(needed);
-        }
-        return output;
-      },
-      remainder() {
-        return new ReadableStream<Uint8Array>({
-          async pull(controller) {
-            if (pending !== null) {
-              const value = pending;
-              pending = null;
-              controller.enqueue(value);
-              return;
-            }
-            const result = await reader.read();
-            if (result.done) controller.close();
-            else controller.enqueue(result.value);
-          },
-          async cancel(reason) {
-            await reader.cancel(reason);
-          },
-        });
-      },
-      async cancel(reason) {
-        await reader.cancel(reason);
-      },
-    };
-  }
-}
-
-function streamWithPrelude(
-  prefix: Uint8Array,
-  manifest: Uint8Array,
-  remainder: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> {
-  const reader = remainder.getReader();
-  const prelude = [prefix, manifest];
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const next = prelude.shift();
-      if (next !== undefined) {
-        controller.enqueue(next);
-        return;
-      }
-      const result = await reader.read();
-      if (result.done) controller.close();
-      else controller.enqueue(result.value);
-    },
-    async cancel(reason) {
-      await reader.cancel(reason);
-    },
-  });
-}
-
-function toHex(bytes: Uint8Array): string {
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function parseContentDigest(value: string | null): string {
@@ -188,30 +60,6 @@ function parseContentLength(value: string | null): number {
     throw new HttpError(413, "bundle_too_large", "Bundle reaches the 8 MiB limit", false);
   }
   return length;
-}
-
-async function parseDescriptor(
-  body: ReadableStream<Uint8Array>,
-  contentLength: number,
-): Promise<{
-  descriptor: ValidatedBundleDescriptor;
-  source: ReadableStream<Uint8Array>;
-}> {
-  const reader = createBodyReader(body);
-  const prefix = await reader.readExactly(BUNDLE_PREFIX_BYTES);
-  const { manifestLength } = parseBundlePrefix(prefix);
-  if (BUNDLE_PREFIX_BYTES + manifestLength >= contentLength) {
-    await reader.cancel("manifest leaves no Run segment");
-    throw new HttpError(422, "invalid_bundle", "Bundle Run segment is missing", false, {
-      reason: "run_missing",
-    });
-  }
-  const manifest = await reader.readExactly(manifestLength);
-  const descriptor = validateManifest(manifest, contentLength);
-  return {
-    descriptor,
-    source: streamWithPrelude(prefix, manifest, reader.remainder()),
-  };
 }
 
 async function existingByBundleId(
@@ -279,11 +127,10 @@ async function validateExistingObject(
     throw new HttpError(503, "storage_unavailable", "Conditional R2 conflict object disappeared", true);
   }
   try {
-    const parsed = await parseDescriptor(object.body, object.size);
-    const validation = validatedBundleStream(parsed.source, parsed.descriptor, null);
-    await validation.stream.pipeTo(new WritableStream<Uint8Array>());
-    const digest = await validation.digest;
-    if (parsed.descriptor.bundleId !== incomingBundleId || digest !== incomingDigest) {
+    const opened = await openBundle(object.body, object.size, null);
+    await opened.body.pipeTo(new WritableStream<Uint8Array>());
+    const digest = await opened.digest;
+    if (opened.descriptor.bundleId !== incomingBundleId || digest !== incomingDigest) {
       throw new HttpError(409, "bundle_id_conflict", "Bundle ID already has different bytes", false);
     }
     return object.uploaded.getTime();
@@ -296,13 +143,12 @@ async function validateExistingObject(
 
 async function putConditionally(
   env: Env,
-  descriptor: ValidatedBundleDescriptor,
-  source: ReadableStream<Uint8Array>,
+  opened: OpenedBundle,
   digest: string,
 ): Promise<{ created: boolean; storedAtMs: number }> {
-  const validated = validatedBundleStream(source, descriptor, digest);
+  const descriptor = opened.descriptor;
   const fixed = new FixedLengthStream(descriptor.objectBytes);
-  const pump = validated.stream.pipeTo(fixed.writable);
+  const pump = opened.body.pipeTo(fixed.writable);
   void pump.catch(() => undefined);
   let object: R2Object | null;
   try {
@@ -345,7 +191,7 @@ async function putConditionally(
 
   try {
     await pump;
-    await validated.digest;
+    await opened.digest;
     return { created: true, storedAtMs: object.uploaded.getTime() };
   } catch (error) {
     await env.BUNDLE_BUCKET.delete(descriptor.objectKey).catch(() => undefined);
@@ -455,14 +301,15 @@ export async function ingestBundle(
   if (request.body === null) {
     throw new HttpError(400, "invalid_content_length", "Bundle body is missing", false);
   }
-  const { descriptor, source } = await parseDescriptor(request.body, contentLength);
+  const opened = await openBundle(request.body, contentLength, digest);
+  const { descriptor } = opened;
   const duplicate = await precheck(env, descriptor, digest);
   if (duplicate !== null) {
-    await source.cancel("duplicate Bundle").catch(() => undefined);
+    await opened.body.cancel("duplicate Bundle").catch(() => undefined);
     return { status: 200, receipt: duplicate };
   }
 
-  const objectWrite = await putConditionally(env, descriptor, source, digest);
+  const objectWrite = await putConditionally(env, opened, digest);
   const now = deps.now();
   try {
     await commitDescriptor(env, descriptor, digest, now, objectWrite.storedAtMs);
