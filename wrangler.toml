@@ -1,0 +1,42 @@
+name = "bazaarplusplus-mod-api-v5"
+main = "src/index.ts"
+compatibility_date = "2026-08-02"
+workers_dev = false
+
+[placement]
+region = "aws:ap-east-1"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1.0
+
+[vars]
+BUNDLE_BUCKET_NAME = "bazaarplusplus-bundle-v5"
+R2_ACCOUNT_ID = "replace-with-cloudflare-account-id"
+R2_PRESIGN_ACCESS_KEY_ID = "replace-with-read-only-access-key-id"
+
+[[routes]]
+pattern = "mod-api-v5.bazaarplusplus.com"
+custom_domain = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bazaarplusplus-mod-api-v5-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "BUNDLE_BUCKET"
+bucket_name = "bazaarplusplus-bundle-v5"
+
+[[ratelimits]]
+name = "GHOST_BATTLE_RATE_LIMITER"
+namespace_id = "1001"
+
+[ratelimits.simple]
+limit = 60
+period = 60
