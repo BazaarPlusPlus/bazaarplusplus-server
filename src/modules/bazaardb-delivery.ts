@@ -7,10 +7,10 @@ import {
   SETTLE_MAX_RESULTS,
 } from "../domain/limits";
 import type { Env } from "../env";
+import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { readJsonObject } from "../http/request";
 import { logEvent } from "../observability";
-import { createBundleDownloadSigner } from "../r2/presigner";
 
 interface ClaimRow {
   bundle_id: string;
@@ -65,11 +65,12 @@ export async function claimDeliveries(
   request: Request,
   env: Env,
   requestId: string,
+  deps: HandlerDeps,
 ): Promise<Record<string, unknown>> {
   const body = await readJsonObject(request);
   const limit = claimLimit(body.limit);
-  const signer = createBundleDownloadSigner(env);
-  const now = Date.now();
+  const signer = deps.signer;
+  const now = deps.now();
   const expiresAt = now + CLAIM_LEASE_MS;
   const claimId = `clm_${crypto.randomUUID()}`;
   let rows: ClaimRow[];
@@ -235,9 +236,10 @@ export async function settleDeliveries(
   request: Request,
   env: Env,
   requestId: string,
+  deps: HandlerDeps,
 ): Promise<Record<string, unknown>> {
   const input = parseSettle(await readJsonObject(request));
-  const now = Date.now();
+  const now = deps.now();
   const statements: D1PreparedStatement[] = [];
   for (const result of input.results) {
     statements.push(

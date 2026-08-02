@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { MAX_BUNDLE_BYTES } from "../domain/limits";
+import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logError, logEvent } from "../observability";
 import {
@@ -444,6 +445,7 @@ export async function ingestBundle(
   request: Request,
   env: Env,
   requestId: string,
+  deps: HandlerDeps,
 ): Promise<{ status: 200 | 201; receipt: BundleReceipt }> {
   if (request.headers.get("Content-Type") !== "application/x-bpp-bundle-v5") {
     throw new HttpError(415, "unsupported_content_type", "Bundle content type is unsupported", false);
@@ -461,7 +463,7 @@ export async function ingestBundle(
   }
 
   const objectWrite = await putConditionally(env, descriptor, source, digest);
-  const now = Date.now();
+  const now = deps.now();
   try {
     await commitDescriptor(env, descriptor, digest, now, objectWrite.storedAtMs);
   } catch {

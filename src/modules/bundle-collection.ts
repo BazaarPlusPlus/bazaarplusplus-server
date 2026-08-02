@@ -6,9 +6,9 @@ import {
   SYNC_SETTLE_LAG_MS,
 } from "../domain/limits";
 import type { Env } from "../env";
+import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logEvent } from "../observability";
-import { createBundleDownloadSigner } from "../r2/presigner";
 
 interface CollectionRow {
   bundle_id: string;
@@ -45,6 +45,7 @@ export async function collectBundles(
   request: Request,
   env: Env,
   requestId: string,
+  deps: HandlerDeps,
 ): Promise<Record<string, unknown>> {
   const url = new URL(request.url);
   const allowed = new Set([
@@ -62,7 +63,7 @@ export async function collectBundles(
     }
   }
 
-  const now = Date.now();
+  const now = deps.now();
   const settlePoint = now - SYNC_SETTLE_LAG_MS;
   const from = integer(oneValue(url.searchParams, "available_from_ms", true), "available_from_ms");
   if (from < now - SYNC_MAX_LOOKBACK_MS) {
@@ -121,7 +122,7 @@ export async function collectBundles(
 
   const hasNext = rows.length > limit;
   const returned = rows.slice(0, limit);
-  const signer = createBundleDownloadSigner(env);
+  const signer = deps.signer;
   let items: Array<Record<string, unknown>>;
   try {
     items = await Promise.all(

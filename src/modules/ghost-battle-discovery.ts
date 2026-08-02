@@ -5,9 +5,9 @@ import {
   GHOST_MAX_LIMIT,
 } from "../domain/limits";
 import type { Env } from "../env";
+import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logEvent } from "../observability";
-import { createBundleDownloadSigner } from "../r2/presigner";
 
 interface GhostRow {
   battle_id: string;
@@ -41,6 +41,7 @@ export async function discoverGhostBattles(
   request: Request,
   env: Env,
   requestId: string,
+  deps: HandlerDeps,
 ): Promise<Record<string, unknown>> {
   const rateLimitKey = request.headers.get("CF-Connecting-IP") ?? "unknown";
   let rateLimit: RateLimitOutcome;
@@ -92,7 +93,7 @@ export async function discoverGhostBattles(
     });
   }
 
-  const issuedAt = Date.now();
+  const issuedAt = deps.now();
   let rows: GhostRow[];
   try {
     const result = await env.DB.prepare(
@@ -117,7 +118,7 @@ export async function discoverGhostBattles(
     throw new HttpError(503, "storage_unavailable", "Ghost Battle query failed", true);
   }
 
-  const signer = createBundleDownloadSigner(env);
+  const signer = deps.signer;
   const signedByKey = new Map<string, Promise<{ url: string; expiresAtMs: number }>>();
   try {
     const battles = await Promise.all(
