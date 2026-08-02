@@ -2,15 +2,10 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
 import validBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
 import worker from "../src/index";
-import { contentDigest, uploadRequest } from "./fixtures/bundle";
-
-function decode(value: string): Uint8Array {
-  const binary = atob(value.trim());
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
+import { contentDigest, decodeBase64, uploadRequest } from "./fixtures/bundle";
 
 async function headers(bytes: Uint8Array): Promise<Headers> {
   return new Headers({
@@ -25,14 +20,14 @@ describe("checked-in Bundle V5 golden vectors", () => {
     [corruptMagicBase64, "invalid_bundle"],
     [segmentMismatchBase64, "segment_digest_mismatch"],
   ])("rejects a checked-in corrupt vector", async (encoded, code) => {
-    const body = decode(encoded);
+    const body = decodeBase64(encoded);
     const response = await worker.fetch(uploadRequest(body, await headers(body)), env);
     expect(response.status).toBe(422);
     expect((await response.json()) as object).toMatchObject({ error: { code } });
   });
 
   test("accepts the canonical Run-only vector", async () => {
-    const body = decode(validBase64);
+    const body = decodeBase64(validBase64);
     expect(body.byteLength).toBe(399);
     const response = await worker.fetch(uploadRequest(body, await headers(body)), env);
     expect(response.status).toBe(201);

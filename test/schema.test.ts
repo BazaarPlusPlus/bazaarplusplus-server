@@ -1,29 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import type { ValidatedBundleDescriptor } from "../src/bundle/manifest";
-import { openBundle } from "../src/bundle/open";
 import { commitBundle } from "../src/modules/bundle-commit";
-import { makeBundleFixture, type BundleFixtureOptions } from "./fixtures/bundle";
-
-function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
-async function bundleData(options: BundleFixtureOptions): Promise<{
-  descriptor: ValidatedBundleDescriptor;
-  digest: string;
-}> {
-  const fixture = await makeBundleFixture(options);
-  const opened = await openBundle(stream(fixture.body), fixture.body.byteLength, null);
-  await opened.body.pipeTo(new WritableStream<Uint8Array>());
-  return { descriptor: opened.descriptor, digest: await opened.digest };
-}
+import { bundleData } from "./fixtures/bundle";
 
 test("the initial migration creates only the V5 domain tables", async () => {
   const result = await env.DB.prepare(
@@ -56,7 +35,9 @@ describe("V5 relational constraints", () => {
   ) VALUES (?1, ?2, 'schema-uploader', ?3, ?4, 5, 10, 100, 1, 1, 1, 5, 10, ?4, ?5, ?6, ?7, ?8)`;
 
   test("foreign keys are enabled and reject a Ghost row without its Bundle", async () => {
-    const foreignKeys = await env.DB.prepare(`PRAGMA foreign_keys`).first<{ foreign_keys: number }>();
+    const foreignKeys = await env.DB.prepare(`PRAGMA foreign_keys`).first<{
+      foreign_keys: number;
+    }>();
     expect(foreignKeys?.foreign_keys).toBe(1);
     await expect(
       env.DB.prepare(

@@ -2,11 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
-import {
-  contentDigest,
-  makeBundleFixture,
-  uploadRequest,
-} from "./fixtures/bundle";
+import { contentDigest, makeBundleFixture, uploadRequest } from "./fixtures/bundle";
 
 describe("POST /bundles", () => {
   test("stores one Run-only Bundle and returns its receipt", async () => {
@@ -74,9 +70,7 @@ describe("POST /bundles", () => {
       error: { code: "segment_digest_mismatch", retryable: false },
     });
     expect(
-      await env.BUNDLE_BUCKET.head(
-        "bundles/2026-08-02/01J00000000000000000000003.bundle",
-      ),
+      await env.BUNDLE_BUCKET.head("bundles/2026-08-02/01J00000000000000000000003.bundle"),
     ).toBeNull();
   });
 

@@ -2,21 +2,12 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
-import {
-  CLAIM_LEASE_MS,
-  DELIVERY_RETRY_BACKOFF_MS,
-} from "../src/limits";
-import {
-  claimDeliveries,
-  settleDeliveries,
-} from "../src/modules/bazaardb-delivery";
+import { CLAIM_LEASE_MS, DELIVERY_RETRY_BACKOFF_MS } from "../src/limits";
+import { claimDeliveries, settleDeliveries } from "../src/modules/bazaardb-delivery";
 import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
 import { FakeClock } from "./fixtures/clock";
 import { createTestDeps } from "./fixtures/deps";
-import {
-  RecordingBundleDownloadSigner,
-  RejectingBundleDownloadSigner,
-} from "./fixtures/presigner";
+import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
 
 const DELIVERY_TOKEN = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
@@ -36,18 +27,46 @@ async function uploadScreenshotBundle(index: number): Promise<string> {
 }
 
 function deliveryRequest(path: "claim" | "settle", body: unknown): Request {
-  return new Request(
-    `https://mod-api-v5.bazaarplusplus.com/bazaardb/deliveries/${path}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${DELIVERY_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+  return new Request(`https://mod-api-v5.bazaarplusplus.com/bazaardb/deliveries/${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${DELIVERY_TOKEN}`,
+      "Content-Type": "application/json",
     },
-  );
+    body: JSON.stringify(body),
+  });
 }
+
+function rawDeliveryRequest(
+  path: "claim" | "settle",
+  headers: HeadersInit,
+  body?: BodyInit,
+): Request {
+  return new Request(`https://mod-api-v5.bazaarplusplus.com/bazaardb/deliveries/${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${DELIVERY_TOKEN}`, ...headers },
+    body,
+  });
+}
+
+function settleBundleId(index: number): string {
+  return `01J0${String(index).padStart(22, "0")}`;
+}
+
+async function expectErrorBody(
+  response: Response,
+  code: string,
+  retryable: boolean,
+): Promise<void> {
+  expect(response.headers.get("Content-Type")).toContain("application/json");
+  const body = (await response.json()) as {
+    error: { code: string; retryable: boolean; request_id: string };
+  };
+  expect(body.error).toMatchObject({ code, retryable });
+  expect(body.error.request_id).toBeTruthy();
+}
+
+const VALID_CLAIM_ID = "clm_550e8400-e29b-41d4-a716-446655440000";
 
 async function claim(limit = 1): Promise<{
   claim_id: string | null;
@@ -162,9 +181,7 @@ describe("BazaarDB delivery claim and settle", () => {
       summary: { applied: 1, duplicate: 0, rejected: 0 },
     });
 
-    await env.DB.prepare(
-      `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
-    )
+    await env.DB.prepare(`UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`)
       .bind(Date.now() - 1, bundleId)
       .run();
     const secondClaim = await claim();
@@ -228,9 +245,7 @@ describe("BazaarDB delivery claim and settle", () => {
     const permanent = await worker.fetch(
       deliveryRequest("settle", {
         claim_id: permanentClaim.claim_id,
-        results: [
-          { bundle_id: permanentId, outcome: "permanent_failure", reason: "invalid_data" },
-        ],
+        results: [{ bundle_id: permanentId, outcome: "permanent_failure", reason: "invalid_data" }],
       }),
       env,
     );
@@ -310,9 +325,7 @@ describe("BazaarDB delivery claim and settle", () => {
     ]);
     const leased = await claim(2);
     expect(leased.items.map(({ bundle_id }) => bundle_id)).toEqual([appliedId, staleId]);
-    await env.DB.prepare(
-      `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
-    )
+    await env.DB.prepare(`UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`)
       .bind(Date.now() - 1, staleId)
       .run();
     const response = await worker.fetch(
@@ -428,7 +441,8 @@ describe("BazaarDB delivery claim and settle", () => {
 
     const first = await directClaim();
     expect(first.items).toMatchObject([{ bundle_id: bundleId }]);
-    const firstSettle = await retry(first.claim_id!);
+    if (first.claim_id === null) throw new Error("expected the first claim to return a claim id");
+    const firstSettle = await retry(first.claim_id);
     expect(firstSettle).toMatchObject({
       items: [
         {
@@ -444,7 +458,8 @@ describe("BazaarDB delivery claim and settle", () => {
     clock.advance(1);
     const second = await directClaim();
     expect(second.items).toMatchObject([{ bundle_id: bundleId }]);
-    const secondSettle = await retry(second.claim_id!);
+    if (second.claim_id === null) throw new Error("expected the second claim to return a claim id");
+    const secondSettle = await retry(second.claim_id);
     expect(secondSettle).toMatchObject({
       items: [
         {
@@ -461,5 +476,192 @@ describe("BazaarDB delivery claim and settle", () => {
     const third = await directClaim();
     expect(third.items).toMatchObject([{ bundle_id: bundleId }]);
     await env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId).run();
+  });
+});
+
+describe("claim invalid_limit", () => {
+  test.each([
+    ["a limit of 0", 0],
+    ["a limit of 51", 51],
+    ["a string limit", "10"],
+    ["a fractional limit", 1.5],
+  ])("rejects a claim request with %s", async (_label, limit) => {
+    const response = await worker.fetch(deliveryRequest("claim", { limit }), env);
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_limit", false);
+  });
+});
+
+describe("settle invalid_settle_request", () => {
+  test("rejects a malformed claim_id", async () => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: "not-a-valid-claim-id",
+        results: [{ bundle_id: settleBundleId(1), outcome: "accepted" }],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects settle requests with missing or empty results", async () => {
+    const missing = await worker.fetch(
+      deliveryRequest("settle", { claim_id: VALID_CLAIM_ID }),
+      env,
+    );
+    expect(missing.status).toBe(400);
+    await expectErrorBody(missing, "invalid_settle_request", false);
+
+    const empty = await worker.fetch(
+      deliveryRequest("settle", { claim_id: VALID_CLAIM_ID, results: [] }),
+      env,
+    );
+    expect(empty.status).toBe(400);
+    await expectErrorBody(empty, "invalid_settle_request", false);
+  });
+
+  test("rejects more than 50 results", async () => {
+    const results = Array.from({ length: 51 }, (_, index) => ({
+      bundle_id: settleBundleId(index),
+      outcome: "accepted",
+    }));
+    const response = await worker.fetch(
+      deliveryRequest("settle", { claim_id: VALID_CLAIM_ID, results }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects a settle result that is not an object", async () => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: ["not-an-object"],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects an invalid bundle_id", async () => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: [{ bundle_id: "not-a-valid-bundle-id!", outcome: "accepted" }],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects a duplicate bundle_id in one request", async () => {
+    const bundleId = settleBundleId(2);
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: [
+          { bundle_id: bundleId, outcome: "accepted" },
+          { bundle_id: bundleId, outcome: "accepted" },
+        ],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects an invalid outcome value", async () => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: [{ bundle_id: settleBundleId(3), outcome: "unknown_outcome" }],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test("rejects an accepted outcome that includes a reason", async () => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: [{ bundle_id: settleBundleId(4), outcome: "accepted", reason: "timeout" }],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+
+  test.each([
+    ["an uppercase reason", "TIMEOUT"],
+    ["a reason longer than 64 characters", "a".repeat(65)],
+    ["a missing reason", undefined],
+  ])("rejects a failure outcome with %s", async (_label, reason) => {
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: VALID_CLAIM_ID,
+        results: [{ bundle_id: settleBundleId(5), outcome: "retryable_failure", reason }],
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_settle_request", false);
+  });
+});
+
+describe("readJsonObject invalid_json contract", () => {
+  test("rejects the wrong Content-Type", async () => {
+    const response = await worker.fetch(
+      rawDeliveryRequest("claim", { "Content-Type": "text/plain" }, JSON.stringify({ limit: 1 })),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_json", false);
+  });
+
+  test("rejects a declared body larger than 64 KiB", async () => {
+    const response = await worker.fetch(
+      rawDeliveryRequest(
+        "claim",
+        { "Content-Type": "application/json", "Content-Length": "70000" },
+        JSON.stringify({ limit: 1 }),
+      ),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_json", false);
+  });
+
+  test("rejects malformed JSON text", async () => {
+    const response = await worker.fetch(
+      rawDeliveryRequest("claim", { "Content-Type": "application/json" }, "{not json"),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_json", false);
+  });
+
+  test("rejects a JSON array root", async () => {
+    const response = await worker.fetch(
+      rawDeliveryRequest("claim", { "Content-Type": "application/json" }, "[1,2,3]"),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_json", false);
+  });
+
+  test("rejects a missing body", async () => {
+    const response = await worker.fetch(
+      rawDeliveryRequest("claim", { "Content-Type": "application/json" }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expectErrorBody(response, "invalid_json", false);
   });
 });

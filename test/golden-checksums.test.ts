@@ -2,8 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import checksumsJson from "../contracts/v5/fixtures/checksums.json?raw";
 import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
 import runOnlyBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
+import { decodeBase64, sha256Hex } from "./fixtures/bundle";
 
 interface FixtureChecksums {
   "run-only.bundle.b64": {
@@ -22,31 +23,21 @@ interface FixtureChecksums {
   };
 }
 
-function decode(value: string): Uint8Array {
-  const binary = atob(value.trim());
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-async function sha256(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 describe("Bundle V5 golden checksum manifest", () => {
   test("matches the checked-in Bundle vectors", async () => {
     const checksums = JSON.parse(checksumsJson) as FixtureChecksums;
-    const runOnly = decode(runOnlyBase64);
-    const corruptMagic = decode(corruptMagicBase64);
-    const segmentMismatch = decode(segmentMismatchBase64);
+    const runOnly = decodeBase64(runOnlyBase64);
+    const corruptMagic = decodeBase64(corruptMagicBase64);
+    const segmentMismatch = decodeBase64(segmentMismatchBase64);
 
     expect(runOnly.byteLength).toBe(checksums["run-only.bundle.b64"].decoded_bytes);
     expect(new DataView(runOnly.buffer).getUint32(12, false)).toBe(
       checksums["run-only.bundle.b64"].manifest_bytes,
     );
-    expect(await sha256(runOnly)).toBe(checksums["run-only.bundle.b64"].sha256);
+    expect(await sha256Hex(runOnly)).toBe(checksums["run-only.bundle.b64"].sha256);
     expect(checksums["run-only.bundle.b64"].expected).toBe("valid");
 
-    expect(await sha256(segmentMismatch)).toBe(
+    expect(await sha256Hex(segmentMismatch)).toBe(
       checksums["segment-digest-mismatch.bundle.b64"].sha256,
     );
     expect(checksums["segment-digest-mismatch.bundle.b64"].expected_error).toBe(

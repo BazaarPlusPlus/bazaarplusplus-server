@@ -2,23 +2,10 @@ import { describe, expect, test } from "vitest";
 
 import checksumsJson from "../contracts/v5/fixtures/checksums.json?raw";
 import corruptMagicBase64 from "../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
-import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
 import runOnlyBase64 from "../contracts/v5/fixtures/run-only.bundle.b64?raw";
+import segmentMismatchBase64 from "../contracts/v5/fixtures/segment-digest-mismatch.bundle.b64?raw";
 import { openBundle } from "../src/bundle/open";
-
-function decode(value: string): Uint8Array {
-  const binary = atob(value.trim());
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
+import { decodeBase64, stream } from "./fixtures/bundle";
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(
@@ -29,7 +16,7 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 
 describe("openBundle", () => {
   test("rejects corrupt magic before exposing a body", async () => {
-    const bytes = decode(corruptMagicBase64);
+    const bytes = decodeBase64(corruptMagicBase64);
     await expect(openBundle(stream(bytes), bytes.byteLength, null)).rejects.toMatchObject({
       status: 422,
       code: "invalid_bundle",
@@ -40,7 +27,7 @@ describe("openBundle", () => {
   });
 
   test("rejects body and digest with the same segment mismatch error", async () => {
-    const bytes = decode(segmentMismatchBase64);
+    const bytes = decodeBase64(segmentMismatchBase64);
     const opened = await openBundle(stream(bytes), bytes.byteLength, null);
     const [bodyError, digestError] = await Promise.all([
       rejection(opened.body.pipeTo(new WritableStream<Uint8Array>())),
@@ -58,7 +45,7 @@ describe("openBundle", () => {
   });
 
   test("opens and validates the canonical Run-only Bundle", async () => {
-    const bytes = decode(runOnlyBase64);
+    const bytes = decodeBase64(runOnlyBase64);
     const checksums = JSON.parse(checksumsJson) as {
       "run-only.bundle.b64": { sha256: string };
     };
@@ -87,7 +74,7 @@ describe("openBundle", () => {
   });
 
   test("maps an expected whole-Bundle digest mismatch without changing its text", async () => {
-    const bytes = decode(runOnlyBase64);
+    const bytes = decodeBase64(runOnlyBase64);
     const opened = await openBundle(stream(bytes), bytes.byteLength, "0".repeat(64));
     const [bodyError, digestError] = await Promise.all([
       rejection(opened.body.pipeTo(new WritableStream<Uint8Array>())),

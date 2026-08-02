@@ -6,7 +6,7 @@ import { discoverGhostBattles } from "../src/modules/ghost-battle-discovery";
 import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
 import { FakeClock } from "./fixtures/clock";
 import { createTestDeps } from "./fixtures/deps";
-import { RecordingBundleDownloadSigner } from "./fixtures/presigner";
+import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
 
 describe("GET /ghost-battles", () => {
   test("uses one injected signing time and deduplicates a shared Bundle key", async () => {
@@ -225,12 +225,7 @@ describe("GET /ghost-battles", () => {
       ) VALUES (?1, 'ghost-cap-run', 'ghost-cap-uploader', ?2, ?3,
                 5, 10, 100, ?4, ?4, ?4, 5, 10, ?3, 0)`,
     )
-      .bind(
-        bundleId,
-        `bundles/2026-08-02/${bundleId}.bundle`,
-        "c".repeat(64),
-        now,
-      )
+      .bind(bundleId, `bundles/2026-08-02/${bundleId}.bundle`, "c".repeat(64), now)
       .run();
     const projection = JSON.stringify({
       day: 1,
@@ -328,7 +323,9 @@ describe("GET /ghost-battles", () => {
       }),
     ];
     for (const fixture of fixtures) {
-      expect((await worker.fetch(uploadRequest(fixture.body, fixture.headers), env)).status).toBe(201);
+      expect((await worker.fetch(uploadRequest(fixture.body, fixture.headers), env)).status).toBe(
+        201,
+      );
     }
 
     const [forA, forB] = await Promise.all(
@@ -350,5 +347,94 @@ describe("GET /ghost-battles", () => {
     expect(forB.battles).toMatchObject([
       { battle_id: "battle-001", player: { account_id: accountA } },
     ]);
+  });
+
+  test("returns storage_unavailable when the rate limiter binding throws", async () => {
+    const failingEnv = {
+      ...env,
+      GHOST_BATTLE_RATE_LIMITER: {
+        async limit() {
+          throw new Error("injected rate limiter failure");
+        },
+      },
+    } as unknown as Cloudflare.Env;
+
+    const response = await worker.fetch(
+      new Request(
+        "https://mod-api-v5.bazaarplusplus.com/ghost-battles?player_account_id=ghost-rate-limiter-failure",
+      ),
+      failingEnv,
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      error: { code: string; retryable: boolean; request_id: string };
+    };
+    expect(body.error).toMatchObject({ code: "storage_unavailable", retryable: true });
+    expect(body.error.request_id).toBeTruthy();
+  });
+
+  test("returns storage_unavailable when the Ghost query fails", async () => {
+    const failingEnv = {
+      ...env,
+      DB: {
+        prepare() {
+          throw new Error("injected D1 query failure");
+        },
+      },
+    } as unknown as Cloudflare.Env;
+
+    const response = await worker.fetch(
+      new Request(
+        "https://mod-api-v5.bazaarplusplus.com/ghost-battles?player_account_id=ghost-query-failure",
+      ),
+      failingEnv,
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      error: { code: string; retryable: boolean; request_id: string };
+    };
+    expect(body.error).toMatchObject({ code: "storage_unavailable", retryable: true });
+    expect(body.error.request_id).toBeTruthy();
+  });
+
+  test("returns storage_unavailable when download signing fails", async () => {
+    const account = "ghost-signing-failure-opponent";
+    const bundleId = "01J00000000000000000000241";
+    const objectKey = `bundles/2026-08-02/${bundleId}.bundle`;
+    await env.DB.prepare(
+      `INSERT INTO bundles (
+        bundle_id, run_id, uploader_account_id, object_key, bundle_sha256,
+        bundle_version, manifest_bytes, object_bytes, client_created_at_ms,
+        stored_at_ms, available_at_ms, run_format_version, run_bytes, run_sha256,
+        has_screenshot
+      ) VALUES (?1, 'ghost-signing-failure-run', 'ghost-signing-failure-uploader', ?2, ?3,
+                5, 10, 100, ?4, ?4, ?4, 5, 10, ?3, 0)`,
+    )
+      .bind(bundleId, objectKey, "e".repeat(64), Date.now())
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO ghost_battles (
+        uploader_account_id, battle_id, bundle_id, opponent_account_id,
+        recorded_at_ms, is_final_battle, projection_json
+      ) VALUES ('ghost-signing-failure-uploader', 'ghost-signing-failure-battle', ?1, ?2, ?3, 0, '{"day":1}')`,
+    )
+      .bind(bundleId, account, Date.now())
+      .run();
+
+    await expect(
+      discoverGhostBattles(
+        new Request(
+          `https://mod-api-v5.bazaarplusplus.com/ghost-battles?player_account_id=${account}`,
+        ),
+        env,
+        "ghost-signing-failure-deps",
+        createTestDeps({ signer: new RejectingBundleDownloadSigner() }),
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "storage_unavailable",
+      message: "Ghost Battle URL signing failed",
+      retryable: true,
+    });
   });
 });

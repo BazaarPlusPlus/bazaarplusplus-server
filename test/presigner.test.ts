@@ -1,14 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import {
-  createBundleDownloadSigner,
-  signDownloadPage,
-} from "../src/presigner";
-import {
-  RecordingBundleDownloadSigner,
-  RejectingBundleDownloadSigner,
-} from "./fixtures/presigner";
+import { createBundleDownloadSigner, signDownloadPage } from "../src/presigner";
+import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
 
 describe("Bundle download presigner adapters", () => {
   test("the production adapter fixes the R2 endpoint, object, operation and 7-day expiry", async () => {
@@ -17,9 +11,7 @@ describe("Bundle download presigner adapters", () => {
     const signed = await createBundleDownloadSigner(env).sign(key, issuedAt);
     const url = new URL(signed.url);
 
-    expect(url.hostname).toBe(
-      "bazaarplusplus-bundle-v5.test-account-id.r2.cloudflarestorage.com",
-    );
+    expect(url.hostname).toBe("bazaarplusplus-bundle-v5.test-account-id.r2.cloudflarestorage.com");
     expect(url.pathname).toBe(`/${key}`);
     expect(url.searchParams.get("X-Amz-Expires")).toBe("604800");
     expect(url.searchParams.get("X-Amz-Credential")).toContain("/auto/s3/aws4_request");
@@ -28,10 +20,7 @@ describe("Bundle download presigner adapters", () => {
 
   test("the test adapter records keys without network access", async () => {
     const signer = new RecordingBundleDownloadSigner();
-    const signed = await signer.sign(
-      "bundles/2026-08-02/01J00000000000000000000802.bundle",
-      1000,
-    );
+    const signed = await signer.sign("bundles/2026-08-02/01J00000000000000000000802.bundle", 1000);
     expect(signer.calls).toEqual([
       {
         objectKey: "bundles/2026-08-02/01J00000000000000000000802.bundle",

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { Env } from "../src/env";
-import type { HandlerDeps } from "../src/http/deps";
 import { HttpError } from "../src/errors";
+import type { HandlerDeps } from "../src/http/deps";
 import {
   createFetchHandler,
   type RouteDefinition,

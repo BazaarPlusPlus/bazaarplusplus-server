@@ -25,7 +25,7 @@ describe("Bundle ingest fault recovery", () => {
     expect(failed.status).toBe(503);
     const key = "bundles/2026-08-02/01J00000000000000000000701.bundle";
     const orphan = await env.BUNDLE_BUCKET.head(key);
-    expect(orphan).not.toBeNull();
+    if (orphan === null) throw new Error("expected an R2-only orphan object");
     expect(
       await env.DB.prepare(
         `SELECT bundle_id FROM bundles WHERE bundle_id = '01J00000000000000000000701'`,
@@ -37,7 +37,7 @@ describe("Bundle ingest fault recovery", () => {
       ).first(),
     ).toBeNull();
 
-    const recoveredAt = orphan!.uploaded.getTime() + 10 * 86_400_000;
+    const recoveredAt = orphan.uploaded.getTime() + 10 * 86_400_000;
     const now = vi.spyOn(Date, "now").mockReturnValue(recoveredAt);
     const recovered = await worker.fetch(uploadRequest(fixture.body, fixture.headers), env);
     now.mockRestore();
@@ -48,7 +48,7 @@ describe("Bundle ingest fault recovery", () => {
         `SELECT stored_at_ms, available_at_ms FROM bundles
          WHERE bundle_id = '01J00000000000000000000701'`,
       ).first(),
-    ).toEqual({ stored_at_ms: orphan!.uploaded.getTime(), available_at_ms: recoveredAt });
+    ).toEqual({ stored_at_ms: orphan.uploaded.getTime(), available_at_ms: recoveredAt });
   });
 
   test("a Run conflict never creates a second object", async () => {
@@ -69,14 +69,10 @@ describe("Bundle ingest fault recovery", () => {
       error: { code: "run_already_bundled" },
     });
     expect(
-      await env.BUNDLE_BUCKET.head(
-        "bundles/2026-08-02/01J00000000000000000000703.bundle",
-      ),
+      await env.BUNDLE_BUCKET.head("bundles/2026-08-02/01J00000000000000000000703.bundle"),
     ).toBeNull();
     expect(
-      await env.BUNDLE_BUCKET.head(
-        "bundles/2026-08-02/01J00000000000000000000702.bundle",
-      ),
+      await env.BUNDLE_BUCKET.head("bundles/2026-08-02/01J00000000000000000000702.bundle"),
     ).not.toBeNull();
   });
 
@@ -99,7 +95,8 @@ describe("Bundle ingest fault recovery", () => {
     const object = await env.BUNDLE_BUCKET.get(
       "bundles/2026-08-02/01J00000000000000000000704.bundle",
     );
-    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(first.body);
+    if (object === null) throw new Error("expected the first Bundle object to survive");
+    expect(new Uint8Array(await object.arrayBuffer())).toEqual(first.body);
   });
 
   test("an R2 PUT failure leaves no D1 logical commit", async () => {
@@ -141,7 +138,8 @@ describe("Bundle ingest fault recovery", () => {
     const response = await worker.fetch(uploadRequest(fixture.body, fixture.headers), env);
     expect(response.status).toBe(503);
     const object = await env.BUNDLE_BUCKET.get(key);
-    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(evidence);
+    if (object === null) throw new Error("expected the evidence object to survive");
+    expect(new Uint8Array(await object.arrayBuffer())).toEqual(evidence);
     expect(
       await env.DB.prepare(
         `SELECT bundle_id FROM bundles WHERE bundle_id = '01J00000000000000000000706'`,

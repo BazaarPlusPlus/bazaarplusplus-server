@@ -1,3 +1,6 @@
+import type { ValidatedBundleDescriptor } from "../../src/bundle/manifest";
+import { openBundle } from "../../src/bundle/open";
+
 const encoder = new TextEncoder();
 
 export interface BundleFixtureOptions {
@@ -25,13 +28,29 @@ export async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
 }
 
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  return hex(await sha256(bytes));
+}
+
+export function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value.trim());
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+export function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
 export async function contentDigest(bytes: Uint8Array): Promise<string> {
   return `sha-256=:${base64(await sha256(bytes))}:`;
 }
 
-export async function makeBundleFixture(
-  options: BundleFixtureOptions = {},
-): Promise<{
+export async function makeBundleFixture(options: BundleFixtureOptions = {}): Promise<{
   body: Uint8Array;
   manifest: Record<string, unknown>;
   headers: Headers;
@@ -153,4 +172,14 @@ export function uploadRequest(body: Uint8Array, headers: Headers): Request {
     headers,
     body,
   });
+}
+
+export async function bundleData(options: BundleFixtureOptions): Promise<{
+  descriptor: ValidatedBundleDescriptor;
+  digest: string;
+}> {
+  const fixture = await makeBundleFixture(options);
+  const opened = await openBundle(stream(fixture.body), fixture.body.byteLength, null);
+  await opened.body.pipeTo(new WritableStream<Uint8Array>());
+  return { descriptor: opened.descriptor, digest: await opened.digest };
 }

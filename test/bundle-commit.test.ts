@@ -1,38 +1,14 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import type { ValidatedBundleDescriptor } from "../src/bundle/manifest";
-import { openBundle } from "../src/bundle/open";
 import {
+  type CommitObserver,
   commitBundle,
   inspectExistingBundle,
-  type CommitObserver,
 } from "../src/modules/bundle-commit";
-import {
-  makeBundleFixture,
-  type BundleFixtureOptions,
-} from "./fixtures/bundle";
+import { bundleData } from "./fixtures/bundle";
 
 const TIMES = { availableAtMs: 1_785_628_900_000, storedAtMs: 1_785_628_899_000 };
-
-function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
-async function bundleData(options: BundleFixtureOptions): Promise<{
-  descriptor: ValidatedBundleDescriptor;
-  digest: string;
-}> {
-  const fixture = await makeBundleFixture(options);
-  const opened = await openBundle(stream(fixture.body), fixture.body.byteLength, null);
-  await opened.body.pipeTo(new WritableStream<Uint8Array>());
-  return { descriptor: opened.descriptor, digest: await opened.digest };
-}
 
 describe("bundle commit", () => {
   test("commits a self-opponent Ghost projection", async () => {

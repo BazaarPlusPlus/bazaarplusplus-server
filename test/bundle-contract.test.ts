@@ -2,14 +2,15 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
-import {
-  contentDigest,
-  makeBundleFixture,
-  sealBundle,
-  uploadRequest,
-} from "./fixtures/bundle";
+import { contentDigest, makeBundleFixture, sealBundle, uploadRequest } from "./fixtures/bundle";
 
 const DEFAULT_RUN = new Uint8Array([0x1f, 0x8b, 0x08, 0, 5, 4, 3, 2, 1]);
+
+// Narrow view of the fixture manifest for tests that mutate nested fields.
+interface MutableManifest extends Record<string, unknown> {
+  run: { projection: { battles: Record<string, unknown>[] } };
+  screenshot: { offset: number };
+}
 
 async function errorFor(
   body: Uint8Array,
@@ -62,7 +63,7 @@ describe("Bundle V5 wire validation", () => {
       bundleId: "01J00000000000000000000602",
       runId: "contract-battles-run",
     });
-    const manifest = structuredClone(base.manifest) as Record<string, any>;
+    const manifest = structuredClone(base.manifest) as MutableManifest;
     const battle = manifest.run.projection.battles[0];
     manifest.run.projection.battles = Array.from({ length: 31 }, (_, index) => ({
       ...battle,
@@ -138,7 +139,7 @@ describe("Bundle V5 wire validation", () => {
       runId: "contract-overlap-run",
       screenshotBytes: screenshot,
     });
-    const manifest = structuredClone(fixture.manifest) as Record<string, any>;
+    const manifest = structuredClone(fixture.manifest) as MutableManifest;
     manifest.screenshot.offset = 1;
     const sealed = await sealBundle(manifest, DEFAULT_RUN, screenshot);
     expect(await errorFor(sealed.body, sealed.headers)).toEqual({
