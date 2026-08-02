@@ -26,6 +26,12 @@ npm run dev
 
 Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations and R2 bindings. `npm run check` type-checks production and test code.
 
+## Code layout
+
+`src/http/routes.ts` is the route table, and `src/http/route-shell.ts` is the sole HTTP exit.
+`src/bundle/open.ts` owns Bundle opening and streaming validation.
+`src/modules/bundle-commit.ts` owns Bundle persistence decisions and the atomic D1 commit.
+
 ## Production configuration
 
 `src/env.ts` is the sole binding declaration. Wrangler provides:

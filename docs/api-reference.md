@@ -27,6 +27,8 @@ X-Request-Id: <CF-Ray or server UUID>
 
 `GET /health` and every `/ghost-battles` response also have `Access-Control-Allow-Origin: *`.
 
+Error responses preserve route-specific headers such as `Allow` and `Retry-After`.
+
 A known path with an unsupported method returns `405` with the path's methods in `Allow`. `OPTIONS` returns `204` only for a known path, with `Allow`, `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, and `Access-Control-Max-Age`. An unknown path, including an unknown `OPTIONS` path, returns `404 not_found`.
 
 Errors use:
@@ -326,7 +328,7 @@ Response `200`:
 }
 ```
 
-Rows sort by `recorded_at_ms DESC, battle_id DESC`. The server-owned identity/time/final fields override projection JSON. One response signs each distinct object key once.
+Rows sort by `recorded_at_ms DESC, battle_id DESC`. The server-owned identity/time/final fields override projection JSON.
 
 At ingest, a projection is inserted only when its opponent is the uploader or the opponent already exists in `bundle_uploaders`. The uploader is added only as the final write of a successful Bundle D1 batch. Filtered history is never backfilled. Cross-Bundle duplicate `(uploader_account_id, battle_id)` rows keep the first projection.
 
@@ -419,7 +421,7 @@ Per-item `status` is:
 
 `state` is `pending`, `done`, or `failed`, and is `null` for an unknown item. `next_claim_at_ms` is non-null only for pending work without an active lease. `summary.rejected` counts stale, conflicting, and unknown items.
 
-`accepted` becomes done. `permanent_failure` becomes failed. The first retryable failure waits 60 seconds, the second waits five minutes, and the third becomes failed with `delivery_attempts_exhausted`. Before selecting a claim page, the route also marks pending Bundles older than the 14-day R2 retention as `bundle_expired` and expired third leases as `delivery_attempts_exhausted`. Attempt receipts are immutable across later attempts, so response-loss retries remain idempotent.
+`accepted` becomes done. `permanent_failure` becomes failed. The first retryable failure waits 60 seconds, the second waits five minutes, and the third becomes failed with `delivery_attempts_exhausted`. Before selecting a claim page, `POST /bazaardb/deliveries/claim` also marks pending Bundles older than the 14-day R2 retention as `bundle_expired` and expired third leases as `delivery_attempts_exhausted`. Attempt receipts are immutable across later attempts, so response-loss retries remain idempotent.
 
 Route errors: `400 invalid_json`, `400 invalid_settle_request`, `401 unauthorized`, `403 insufficient_scope`, and `503 storage_unavailable`.
 
@@ -432,6 +434,8 @@ All discovery routes use the same signer contract:
 - region: `auto`;
 - lifetime: 604,800 seconds;
 - key: a validated `bundles/<yyyy-mm-dd>/<bundle_id>.bundle` value read from D1.
+
+One response signs each distinct object key once.
 
 The URL is a bearer capability. The Worker never logs the complete URL and does not receive the subsequent download request.
 

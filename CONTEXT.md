@@ -16,7 +16,7 @@ This Worker receives completed game-run Bundles and makes them discoverable by t
 
 ## Runtime boundaries
 
-The Worker exposes liveness, Bundle ingest, stateless Bundle collection, Ghost discovery, and BazaarDB claim/settle. It exports only `fetch`, has no cron or scheduled handler, and performs no automatic D1 cleanup. Bundle upload retries recover matching R2-only objects, while claim/settle requests lazily converge expired deliveries and exhausted attempts. D1 retention is maintained manually by operators.
+The Worker exposes liveness, Bundle ingest, stateless Bundle collection, Ghost discovery, and BazaarDB claim/settle. It exports only `fetch`, has no cron or scheduled handler, and performs no automatic D1 cleanup. Bundle upload retries recover matching R2-only objects, while claim requests lazily converge expired deliveries and exhausted attempts; settle only guards lease ownership. D1 retention is maintained manually by operators.
 
 Bundle ingest buffers only the fixed prefix and bounded manifest. Run and Screenshot bytes remain compressed/encoded and flow through incremental digest validation into one conditional R2 PUT. The D1 Bundle row, eligible Ghost projections, optional BazaarDB delivery, and uploader record commit in one batch.
 
