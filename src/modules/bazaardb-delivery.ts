@@ -11,6 +11,7 @@ import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { readJsonObject } from "../http/request";
 import { logEvent } from "../observability";
+import { signDownloadPage } from "../r2/presigner";
 
 interface ClaimRow {
   bundle_id: string;
@@ -164,19 +165,20 @@ export async function claimDeliveries(
     return { claim_id: null, expires_at_ms: null, items: [] };
   }
   try {
-    const items = await Promise.all(
-      rows.map(async (row) => {
-        const signed = await signer.sign(row.object_key, now);
-        return {
-          bundle_id: row.bundle_id,
-          run_id: row.run_id,
-          download_url: signed.url,
-          download_expires_at_ms: signed.expiresAtMs,
-          content_type: "application/x-bpp-bundle-v5",
-          sha256: row.bundle_sha256,
-        };
-      }),
+    const downloads = await signDownloadPage(
+      signer,
+      rows.map((row) => row.object_key),
+      now,
+      "BazaarDB claim URL signing failed",
     );
+    const items = rows.map((row, index) => ({
+      bundle_id: row.bundle_id,
+      run_id: row.run_id,
+      download_url: downloads[index].url,
+      download_expires_at_ms: downloads[index].expiresAtMs,
+      content_type: "application/x-bpp-bundle-v5",
+      sha256: row.bundle_sha256,
+    }));
     logEvent("bazaardb.claim", {
       request_id: requestId,
       claim_id: claimId,
@@ -184,8 +186,9 @@ export async function claimDeliveries(
       lease_ms: CLAIM_LEASE_MS,
     });
     return { claim_id: claimId, expires_at_ms: expiresAt, items };
-  } catch {
+  } catch (error) {
     await compensateClaim(env, claimId, now).catch(() => undefined);
+    if (error instanceof HttpError) throw error;
     throw new HttpError(503, "storage_unavailable", "BazaarDB claim URL signing failed", true);
   }
 }

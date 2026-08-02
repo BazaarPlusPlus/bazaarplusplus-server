@@ -2,9 +2,59 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
+import { discoverGhostBattles } from "../src/modules/ghost-battle-discovery";
 import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
+import { FakeClock } from "./fixtures/clock";
+import { createTestDeps } from "./fixtures/deps";
+import { RecordingBundleDownloadSigner } from "./fixtures/presigner";
 
 describe("GET /ghost-battles", () => {
+  test("uses one injected signing time and deduplicates a shared Bundle key", async () => {
+    const clock = new FakeClock(Date.now());
+    const signer = new RecordingBundleDownloadSigner();
+    const account = "ghost-injected-opponent";
+    const bundleId = "01J00000000000000000000240";
+    const objectKey = `bundles/2026-08-02/${bundleId}.bundle`;
+    await env.DB.prepare(
+      `INSERT INTO bundles (
+        bundle_id, run_id, uploader_account_id, object_key, bundle_sha256,
+        bundle_version, manifest_bytes, object_bytes, client_created_at_ms,
+        stored_at_ms, available_at_ms, run_format_version, run_bytes, run_sha256,
+        has_screenshot
+      ) VALUES (?1, 'ghost-injected-run', 'ghost-injected-uploader', ?2, ?3,
+                5, 10, 100, ?4, ?4, ?4, 5, 10, ?3, 0)`,
+    )
+      .bind(bundleId, objectKey, "d".repeat(64), clock.ms)
+      .run();
+    await env.DB.batch(
+      [1, 2].map((index) =>
+        env.DB.prepare(
+          `INSERT INTO ghost_battles (
+            uploader_account_id, battle_id, bundle_id, opponent_account_id,
+            recorded_at_ms, is_final_battle, projection_json
+          ) VALUES ('ghost-injected-uploader', ?1, ?2, ?3, ?4, 0, '{"day":1}')`,
+        ).bind(`ghost-injected-${index}`, bundleId, account, clock.ms - index),
+      ),
+    );
+
+    const result = await discoverGhostBattles(
+      new Request(
+        `https://mod-api-v5.bazaarplusplus.com/ghost-battles?player_account_id=${account}`,
+      ),
+      env,
+      "ghost-injected-deps",
+      createTestDeps({ signer, now: clock.now }),
+    );
+    const battles = result.battles as Array<{ download_expires_at_ms: number }>;
+
+    expect(battles).toHaveLength(2);
+    expect(battles.map(({ download_expires_at_ms }) => download_expires_at_ms)).toEqual([
+      clock.ms + 604_800_000,
+      clock.ms + 604_800_000,
+    ]);
+    expect(signer.calls).toEqual([{ objectKey, issuedAtMs: clock.ms }]);
+  });
+
   test("applies uploader eligibility without backfilling filtered history", async () => {
     const now = Date.now();
     const accountA = "ghost-uploader-a";

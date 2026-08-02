@@ -9,6 +9,7 @@ import type { Env } from "../env";
 import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logEvent } from "../observability";
+import { signDownloadPage } from "../r2/presigner";
 
 interface CollectionRow {
   bundle_id: string;
@@ -123,22 +124,18 @@ export async function collectBundles(
   const hasNext = rows.length > limit;
   const returned = rows.slice(0, limit);
   const signer = deps.signer;
-  let items: Array<Record<string, unknown>>;
-  try {
-    items = await Promise.all(
-      returned.map(async (row) => {
-        const signed = await signer.sign(row.object_key, now);
-        return {
-          bundle_id: row.bundle_id,
-          available_at_ms: row.available_at_ms,
-          download_url: signed.url,
-          download_expires_at_ms: signed.expiresAtMs,
-        };
-      }),
-    );
-  } catch {
-    throw new HttpError(503, "storage_unavailable", "Bundle URL signing failed", true);
-  }
+  const downloads = await signDownloadPage(
+    signer,
+    returned.map((row) => row.object_key),
+    now,
+    "Bundle URL signing failed",
+  );
+  const items = returned.map((row, index) => ({
+    bundle_id: row.bundle_id,
+    available_at_ms: row.available_at_ms,
+    download_url: downloads[index].url,
+    download_expires_at_ms: downloads[index].expiresAtMs,
+  }));
   const last = returned.at(-1);
   logEvent("bundle.collection", {
     request_id: requestId,

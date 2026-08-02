@@ -2,7 +2,14 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
+import { claimDeliveries } from "../src/modules/bazaardb-delivery";
 import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
+import { FakeClock } from "./fixtures/clock";
+import { createTestDeps } from "./fixtures/deps";
+import {
+  RecordingBundleDownloadSigner,
+  RejectingBundleDownloadSigner,
+} from "./fixtures/presigner";
 
 const DELIVERY_TOKEN = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
@@ -46,6 +53,78 @@ async function claim(limit = 1): Promise<{
 }
 
 describe("BazaarDB delivery claim and settle", () => {
+  test("uses the injected clock for claim leases and signed downloads", async () => {
+    const bundleId = await uploadScreenshotBundle(11);
+    const clock = new FakeClock(Date.now());
+    const signer = new RecordingBundleDownloadSigner();
+    const result = await claimDeliveries(
+      deliveryRequest("claim", { limit: 1 }),
+      env,
+      "claim-injected-deps",
+      createTestDeps({ signer, now: clock.now }),
+    );
+    const items = result.items as Array<{
+      bundle_id: string;
+      download_expires_at_ms: number;
+    }>;
+
+    expect(result.expires_at_ms).toBe(clock.ms + 600_000);
+    expect(items).toMatchObject([
+      { bundle_id: bundleId, download_expires_at_ms: clock.ms + 604_800_000 },
+    ]);
+    expect(signer.calls).toEqual([
+      {
+        objectKey: `bundles/2026-08-02/${bundleId}.bundle`,
+        issuedAtMs: clock.ms,
+      },
+    ]);
+    await env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId).run();
+  });
+
+  test("compensates the claim transaction when injected signing fails", async () => {
+    const bundleId = await uploadScreenshotBundle(12);
+    const clock = new FakeClock(Date.now());
+    const signer = new RejectingBundleDownloadSigner();
+
+    await expect(
+      claimDeliveries(
+        deliveryRequest("claim", { limit: 1 }),
+        env,
+        "claim-rejection",
+        createTestDeps({ signer, now: clock.now }),
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "storage_unavailable",
+      message: "BazaarDB claim URL signing failed",
+      retryable: true,
+    });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM bazaardb_delivery_attempts WHERE bundle_id = ?1`,
+      )
+        .bind(bundleId)
+        .first(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.DB.prepare(
+        `SELECT delivery_state, active_claim_id, active_claim_order,
+                claimable_at_ms, delivery_attempts
+         FROM bazaardb_deliveries WHERE bundle_id = ?1`,
+      )
+        .bind(bundleId)
+        .first(),
+    ).toEqual({
+      delivery_state: "pending",
+      active_claim_id: null,
+      active_claim_order: null,
+      claimable_at_ms: clock.ms,
+      delivery_attempts: 0,
+    });
+    expect(signer.calls).toHaveLength(1);
+    await env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId).run();
+  });
+
   test("concurrent consumers claim non-overlapping Bundles", async () => {
     const expected = await Promise.all([uploadScreenshotBundle(1), uploadScreenshotBundle(2)]);
     const [left, right] = await Promise.all([claim(), claim()]);

@@ -8,6 +8,7 @@ import type { Env } from "../env";
 import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logEvent } from "../observability";
+import { signDownloadPage } from "../r2/presigner";
 
 interface GhostRow {
   battle_id: string;
@@ -119,28 +120,25 @@ export async function discoverGhostBattles(
   }
 
   const signer = deps.signer;
-  const signedByKey = new Map<string, Promise<{ url: string; expiresAtMs: number }>>();
   try {
-    const battles = await Promise.all(
-      rows.map(async (row) => {
-        let signed = signedByKey.get(row.object_key);
-        if (signed === undefined) {
-          signed = signer.sign(row.object_key, issuedAt);
-          signedByKey.set(row.object_key, signed);
-        }
-        const projection = JSON.parse(row.projection_json) as Record<string, unknown>;
-        const download = await signed;
-        return {
-          ...projection,
-          battle_id: row.battle_id,
-          bundle_id: row.bundle_id,
-          recorded_at_ms: row.recorded_at_ms,
-          is_final_battle: row.is_final_battle === 1,
-          download_url: download.url,
-          download_expires_at_ms: download.expiresAtMs,
-        };
-      }),
+    const downloads = await signDownloadPage(
+      signer,
+      rows.map((row) => row.object_key),
+      issuedAt,
+      "Ghost Battle URL signing failed",
     );
+    const battles = rows.map((row, index) => {
+      const projection = JSON.parse(row.projection_json) as Record<string, unknown>;
+      return {
+        ...projection,
+        battle_id: row.battle_id,
+        bundle_id: row.bundle_id,
+        recorded_at_ms: row.recorded_at_ms,
+        is_final_battle: row.is_final_battle === 1,
+        download_url: downloads[index].url,
+        download_expires_at_ms: downloads[index].expiresAtMs,
+      };
+    });
     logEvent("ghost.discovery", {
       request_id: requestId,
       account_hash: await accountHash(accountId),

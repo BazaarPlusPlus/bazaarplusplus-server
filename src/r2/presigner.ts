@@ -3,6 +3,7 @@ import { AwsClient } from "aws4fetch";
 import { PRESIGNED_GET_TTL_SECONDS } from "../domain/limits";
 import type { Env } from "../env";
 import { validObjectKey } from "../bundle/manifest";
+import { HttpError } from "../http/errors";
 
 export interface SignedBundleDownload {
   url: string;
@@ -11,6 +12,29 @@ export interface SignedBundleDownload {
 
 export interface BundleDownloadSigner {
   sign(objectKey: string, issuedAtMs: number): Promise<SignedBundleDownload>;
+}
+
+export async function signDownloadPage(
+  signer: BundleDownloadSigner,
+  objectKeys: readonly string[],
+  issuedAtMs: number,
+  failureMessage: string,
+): Promise<SignedBundleDownload[]> {
+  const signedByKey = new Map<string, Promise<SignedBundleDownload>>();
+  try {
+    return await Promise.all(
+      objectKeys.map((objectKey) => {
+        let signed = signedByKey.get(objectKey);
+        if (signed === undefined) {
+          signed = signer.sign(objectKey, issuedAtMs);
+          signedByKey.set(objectKey, signed);
+        }
+        return signed;
+      }),
+    );
+  } catch {
+    throw new HttpError(503, "storage_unavailable", failureMessage, true);
+  }
 }
 
 function sigV4Date(timestamp: number): string {

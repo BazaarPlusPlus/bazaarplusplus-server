@@ -14,3 +14,12 @@ export class RecordingBundleDownloadSigner implements BundleDownloadSigner {
     };
   }
 }
+
+export class RejectingBundleDownloadSigner implements BundleDownloadSigner {
+  readonly calls: Array<{ objectKey: string; issuedAtMs: number }> = [];
+
+  async sign(objectKey: string, issuedAtMs: number): Promise<SignedBundleDownload> {
+    this.calls.push({ objectKey, issuedAtMs });
+    throw new Error("injected signing failure");
+  }
+}

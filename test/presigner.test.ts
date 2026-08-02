@@ -1,8 +1,14 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
-import { createBundleDownloadSigner } from "../src/r2/presigner";
-import { RecordingBundleDownloadSigner } from "./fixtures/presigner";
+import {
+  createBundleDownloadSigner,
+  signDownloadPage,
+} from "../src/r2/presigner";
+import {
+  RecordingBundleDownloadSigner,
+  RejectingBundleDownloadSigner,
+} from "./fixtures/presigner";
 
 describe("Bundle download presigner adapters", () => {
   test("the production adapter fixes the R2 endpoint, object, operation and 7-day expiry", async () => {
@@ -35,6 +41,39 @@ describe("Bundle download presigner adapters", () => {
     expect(signed).toEqual({
       url: "https://fake.invalid/bundles%2F2026-08-02%2F01J00000000000000000000802.bundle?method=GET&expires=604800",
       expiresAtMs: 604_801_000,
+    });
+  });
+
+  test("signs each distinct page key once while preserving input alignment", async () => {
+    const signer = new RecordingBundleDownloadSigner();
+    const first = "bundles/2026-08-02/01J00000000000000000000803.bundle";
+    const second = "bundles/2026-08-02/01J00000000000000000000804.bundle";
+    const downloads = await signDownloadPage(signer, [first, second, first], 2_000, "failed");
+
+    expect(signer.calls).toEqual([
+      { objectKey: first, issuedAtMs: 2_000 },
+      { objectKey: second, issuedAtMs: 2_000 },
+    ]);
+    expect(downloads).toHaveLength(3);
+    expect(downloads[0]).toEqual(downloads[2]);
+    expect(downloads[0].url).toContain(encodeURIComponent(first));
+    expect(downloads[1].url).toContain(encodeURIComponent(second));
+  });
+
+  test("maps any page signing rejection to the caller-specific 503", async () => {
+    const signer = new RejectingBundleDownloadSigner();
+    await expect(
+      signDownloadPage(
+        signer,
+        ["bundles/2026-08-02/01J00000000000000000000805.bundle"],
+        3_000,
+        "Caller-specific signing failed",
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "storage_unavailable",
+      message: "Caller-specific signing failed",
+      retryable: true,
     });
   });
 });
