@@ -4,7 +4,7 @@ CREATE TABLE bundles (
   bundle_id               TEXT PRIMARY KEY,
   run_id                  TEXT NOT NULL UNIQUE,
   uploader_account_id     TEXT NOT NULL,
-  object_key              TEXT NOT NULL UNIQUE,
+  object_key              TEXT NOT NULL,
   bundle_sha256           TEXT NOT NULL CHECK (
     length(bundle_sha256) = 64
     AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'
@@ -28,6 +28,9 @@ CREATE TABLE bundles (
   screenshot_bytes        INTEGER,
   screenshot_sha256       TEXT,
 
+  -- object_key embeds the primary key, so it is unique by construction and
+  -- needs no unique index; this CHECK pins the structure instead.
+  CHECK (object_key = 'bundles/' || substr(object_key, 9, 10) || '/' || bundle_id || '.bundle'),
   CHECK (
     (
       has_screenshot = 0
@@ -47,7 +50,7 @@ CREATE TABLE bundles (
       AND screenshot_sha256 NOT GLOB '*[^0-9a-f]*'
     )
   )
-);
+) WITHOUT ROWID;
 
 CREATE INDEX idx_bundles_available
   ON bundles(available_at_ms, bundle_id, object_key);
@@ -122,7 +125,7 @@ CREATE TABLE bazaardb_deliveries (
       AND failure_reason IS NOT NULL
     )
   )
-);
+) WITHOUT ROWID;
 
 CREATE INDEX idx_bazaardb_claimable
   ON bazaardb_deliveries(claimable_at_ms, created_at_ms, bundle_id)
