@@ -82,7 +82,50 @@ Use a generated Bundle from the checked-in V5 contract implementation, not a pro
 
 ## 6. Post-deploy checks
 
-- Alert on ingest 5xx, identity conflicts, presign failures, Ghost 429 rate, old pending deliveries, exhausted attempts, D1 size, and the age of manually retained rows.
+### 6.1 Log-based alerts (Workers Observability)
+
+The Worker emits one structured JSON line per alertable condition, so each alert is a
+Workers Observability query on the `bazaarplusplus-mod-api-v5` Worker (dashboard:
+Compute → Workers → Observability → create a query, then attach an alert with a
+notification destination). Suggested starting thresholds; tune against real traffic.
+
+| Alert | Query filter | Suggested threshold |
+| --- | --- | --- |
+| Server 5xx (storage, presign, unclassified) | `event = "worker.http_error" OR event = "worker.internal_error"` | > 5 in 5 min |
+| Presign / storage failure specifically | `event = "worker.http_error" AND code = "storage_unavailable"` | > 5 in 5 min |
+| Service token misconfiguration | `event = "worker.http_error" AND code = "invalid_configuration"` | ≥ 1 in 5 min |
+| Ingest identity conflicts | invocation logs: request path `/bundles`, method POST, response status 409 | > 10 in 15 min |
+| Ghost 429 rate | `event = "ghost.discovery" AND limited = true` | > 100 in 5 min |
+| Ingest orphan objects | `event = "bundle.ingest.orphan" OR event = "bundle.orphan.invalid"` | ≥ 1 in 15 min |
+
+Classified 4xx responses are intentionally not logged; they are client errors and
+would drown the signal.
+
+### 6.2 D1 state checks (external prober)
+
+Aged pending deliveries, exhausted attempts, database size, and the age of manually
+retained rows are D1 state, not log events, and the Worker deliberately has no cron.
+Run these from an external scheduler (CI cron or an operator shell) with a Cloudflare
+API token scoped to D1 read:
+
+```sh
+npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT COUNT(*) AS aged_pending FROM bazaardb_deliveries WHERE delivery_state = 'pending' AND created_at_ms < (unixepoch() - 86400) * 1000"
+```
+
+```sh
+npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT COUNT(*) AS exhausted FROM bazaardb_deliveries WHERE delivery_state = 'failed' AND failure_reason = 'delivery_attempts_exhausted' AND failed_at_ms > (unixepoch() - 86400) * 1000"
+```
+
+```sh
+npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT COUNT(*) AS total_bundles, MIN(stored_at_ms) AS oldest_stored_at_ms FROM bundles"
+```
+
+Alert when `aged_pending` is nonzero for more than a day (BazaarDB has stopped
+claiming or keeps failing), when `exhausted` jumps, or when `oldest_stored_at_ms`
+ages past the agreed manual-retention horizon.
+
+### 6.3 Ecosystem gates
+
 - Verify the analyzer and BazaarDB clients compare the decoded Run identity/version with the Bundle manifest and quarantine mismatches.
 - Do not release the V5 mod until analyzer and BazaarDB consumers have completed the direct-R2 smoke test.
 

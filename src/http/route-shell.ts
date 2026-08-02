@@ -146,6 +146,14 @@ export function createFetchHandler(
     if (route.auth !== undefined) {
       const outcome = authenticateServiceToken(request, env, route.auth);
       if (outcome !== "authorized") {
+        if (outcome === "invalid_configuration") {
+          logError("worker.http_error", {
+            request_id: requestId,
+            route: path,
+            status: 500,
+            code: "invalid_configuration",
+          });
+        }
         return authDenial(outcome, requestId);
       }
     }
@@ -160,6 +168,14 @@ export function createFetchHandler(
       });
     } catch (error) {
       if (error instanceof HttpError) {
+        if (error.status >= 500) {
+          logError("worker.http_error", {
+            request_id: requestId,
+            route: path,
+            status: error.status,
+            code: error.code,
+          });
+        }
         return jsonError(
           {
             code: error.code,

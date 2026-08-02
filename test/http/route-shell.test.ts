@@ -109,6 +109,60 @@ describe("route shell", () => {
     );
   });
 
+  test("logs classified 5xx errors for alerting but stays silent on 4xx", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fetch = handlerFor([
+      route("/unavailable", async () => {
+        throw new HttpError(503, "storage_unavailable", "R2 Bundle write failed", true);
+      }),
+      route("/rejected", async () => {
+        throw new HttpError(422, "invalid_bundle", "Bad Bundle");
+      }),
+    ]);
+
+    const unavailable = await fetch(
+      new Request("https://example.test/unavailable", { headers: { "CF-Ray": "alert-ray" } }),
+      testEnv(),
+    );
+    expect(unavailable.status).toBe(503);
+    expect(errorLog).toHaveBeenCalledWith(
+      JSON.stringify({
+        event: "worker.http_error",
+        request_id: "alert-ray",
+        route: "/unavailable",
+        status: 503,
+        code: "storage_unavailable",
+      }),
+    );
+
+    errorLog.mockClear();
+    const rejected = await fetch(new Request("https://example.test/rejected"), testEnv());
+    expect(rejected.status).toBe(422);
+    expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  test("logs an invalid service token configuration on protected routes", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fetch = handlerFor([
+      route("/protected", async () => ({ status: 200, body: {} }), { auth: "bundle_sync" }),
+    ]);
+
+    const response = await fetch(
+      new Request("https://example.test/protected", { headers: { "CF-Ray": "config-ray" } }),
+      testEnv({ BUNDLE_SYNC_TOKEN: "too-short" }),
+    );
+    expect(response.status).toBe(500);
+    expect(errorLog).toHaveBeenCalledWith(
+      JSON.stringify({
+        event: "worker.http_error",
+        request_id: "config-ray",
+        route: "/protected",
+        status: 500,
+        code: "invalid_configuration",
+      }),
+    );
+  });
+
   test("applies route CORS to handler outcomes but not shell errors or non-CORS routes", async () => {
     const fetch = handlerFor([
       route("/cors-ok", async () => ({ status: 200, body: { ok: true } }), { cors: true }),
