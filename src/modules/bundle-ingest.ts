@@ -4,22 +4,13 @@ import type { HandlerDeps } from "../http/deps";
 import { HttpError } from "../http/errors";
 import { logError, logEvent } from "../observability";
 import { toHex } from "../bundle/hex";
-import type { ValidatedBundleDescriptor } from "../bundle/manifest";
 import { openBundle, type OpenedBundle } from "../bundle/open";
-
-interface BundleReceipt {
-  bundle_id: string;
-  run_id: string;
-  outcome: "stored" | "duplicate";
-  bazaardb_delivery: "created" | "existing" | "not_applicable";
-}
-
-interface ExistingBundleRow {
-  bundle_id: string;
-  run_id: string;
-  bundle_sha256: string;
-  has_screenshot: number;
-}
+import {
+  commitBundle,
+  inspectExistingBundle,
+  type BundleReceipt,
+  type CommitOutcome,
+} from "./bundle-commit";
 
 function parseContentDigest(value: string | null): string {
   const match = /^sha-256=:([A-Za-z0-9+/]{43}=):$/.exec(value ?? "");
@@ -60,60 +51,6 @@ function parseContentLength(value: string | null): number {
     throw new HttpError(413, "bundle_too_large", "Bundle reaches the 8 MiB limit", false);
   }
   return length;
-}
-
-async function existingByBundleId(
-  env: Env,
-  bundleId: string,
-): Promise<ExistingBundleRow | null> {
-  return env.DB.prepare(
-    `SELECT bundle_id, run_id, bundle_sha256, has_screenshot FROM bundles WHERE bundle_id = ?1`,
-  )
-    .bind(bundleId)
-    .first<ExistingBundleRow>();
-}
-
-async function bundleForRun(env: Env, runId: string): Promise<string | null> {
-  const row = await env.DB.prepare(`SELECT bundle_id FROM bundles WHERE run_id = ?1`)
-    .bind(runId)
-    .first<{ bundle_id: string }>();
-  return row?.bundle_id ?? null;
-}
-
-function duplicateReceipt(row: ExistingBundleRow): BundleReceipt {
-  return {
-    bundle_id: row.bundle_id,
-    run_id: row.run_id,
-    outcome: "duplicate",
-    bazaardb_delivery: row.has_screenshot === 1 ? "existing" : "not_applicable",
-  };
-}
-
-async function precheck(
-  env: Env,
-  descriptor: ValidatedBundleDescriptor,
-  digest: string,
-): Promise<BundleReceipt | null> {
-  let bundle: ExistingBundleRow | null;
-  let runBundle: string | null;
-  try {
-    [bundle, runBundle] = await Promise.all([
-      existingByBundleId(env, descriptor.bundleId),
-      bundleForRun(env, descriptor.runId),
-    ]);
-  } catch {
-    throw new HttpError(503, "storage_unavailable", "Bundle index is unavailable", true);
-  }
-  if (bundle !== null) {
-    if (bundle.bundle_sha256 !== digest) {
-      throw new HttpError(409, "bundle_id_conflict", "Bundle ID already has different bytes", false);
-    }
-    return duplicateReceipt(bundle);
-  }
-  if (runBundle !== null && runBundle !== descriptor.bundleId) {
-    throw new HttpError(409, "run_already_bundled", "Run already belongs to another Bundle", false);
-  }
-  return null;
 }
 
 async function validateExistingObject(
@@ -200,91 +137,10 @@ async function putConditionally(
   }
 }
 
-async function commitDescriptor(
-  env: Env,
-  descriptor: ValidatedBundleDescriptor,
-  digest: string,
-  availableAt: number,
-  storedAt = availableAt,
-): Promise<void> {
-  const screenshot = descriptor.screenshot;
-  const statements = [
-    env.DB.prepare(
-      `INSERT INTO bundles (
-        bundle_id, run_id, uploader_account_id, object_key, bundle_sha256,
-        bundle_version, manifest_bytes, object_bytes, client_created_at_ms,
-        stored_at_ms, available_at_ms, run_format_version, run_bytes, run_sha256,
-        has_screenshot, screenshot_content_type, screenshot_bytes, screenshot_sha256
-      ) VALUES (?1, ?2, ?3, ?4, ?5, 5, ?6, ?7, ?8, ?9, ?10, 5, ?11, ?12, ?13, ?14, ?15, ?16)`,
-    ).bind(
-      descriptor.bundleId,
-      descriptor.runId,
-      descriptor.uploaderAccountId,
-      descriptor.objectKey,
-      digest,
-      descriptor.manifestBytes,
-      descriptor.objectBytes,
-      descriptor.createdAtMs,
-      storedAt,
-      availableAt,
-      descriptor.run.length,
-      descriptor.run.sha256,
-      screenshot === null ? 0 : 1,
-      screenshot?.contentType ?? null,
-      screenshot?.length ?? null,
-      screenshot?.sha256 ?? null,
-    ),
-    env.DB.prepare(
-      `INSERT INTO ghost_battles (
-        uploader_account_id, battle_id, bundle_id, opponent_account_id,
-        recorded_at_ms, is_final_battle, projection_json
-      )
-      SELECT ?1,
-             json_extract(value, '$.battle_id'),
-             ?2,
-             json_extract(value, '$.opponent.account_id'),
-             json_extract(value, '$.recorded_at_ms'),
-             CASE json_extract(value, '$.is_final_battle') WHEN 1 THEN 1 ELSE 0 END,
-             value
-      FROM json_each(?3)
-      WHERE json_extract(value, '$.opponent.account_id') = ?1
-         OR EXISTS (
-           SELECT 1 FROM bundle_uploaders
-           WHERE player_account_id = json_extract(value, '$.opponent.account_id')
-         )
-      ON CONFLICT(uploader_account_id, battle_id) DO NOTHING`,
-    ).bind(descriptor.uploaderAccountId, descriptor.bundleId, JSON.stringify(descriptor.battles)),
-    env.DB.prepare(
-      `INSERT INTO bazaardb_deliveries (
-        bundle_id, claimable_at_ms, created_at_ms, state_updated_at_ms
-      )
-      SELECT ?1, ?2, ?2, ?2 WHERE ?3 = 1`,
-    ).bind(descriptor.bundleId, availableAt, screenshot === null ? 0 : 1),
-    env.DB.prepare(
-      `SELECT COUNT(*) AS eligible
-       FROM json_each(?1)
-       WHERE json_extract(value, '$.opponent.account_id') = ?2
-          OR EXISTS (
-            SELECT 1 FROM bundle_uploaders
-            WHERE player_account_id = json_extract(value, '$.opponent.account_id')
-          )`,
-    ).bind(JSON.stringify(descriptor.battles), descriptor.uploaderAccountId),
-    env.DB.prepare(
-      `INSERT INTO bundle_uploaders (player_account_id, first_bundle_at_ms)
-       VALUES (?1, ?2) ON CONFLICT(player_account_id) DO NOTHING`,
-    ).bind(descriptor.uploaderAccountId, availableAt),
-  ];
-  const results = await env.DB.batch(statements);
-  const eligible = Number(
-    (results[3]?.results?.[0] as { eligible?: number } | undefined)?.eligible ?? 0,
-  );
-  const inserted = Number(results[1]?.meta.changes ?? 0);
-  if (inserted < eligible) {
-    logEvent("bundle.projection.duplicate", {
-      bundle_id: descriptor.bundleId,
-      dropped: eligible - inserted,
-    });
-  }
+function conflictError(reason: Extract<CommitOutcome, { kind: "conflict" }>["reason"]): HttpError {
+  return reason === "bundle_id_conflict"
+    ? new HttpError(409, reason, "Bundle ID already has different bytes", false)
+    : new HttpError(409, reason, "Run already belongs to another Bundle", false);
 }
 
 export async function ingestBundle(
@@ -303,37 +159,46 @@ export async function ingestBundle(
   }
   const opened = await openBundle(request.body, contentLength, digest);
   const { descriptor } = opened;
-  const duplicate = await precheck(env, descriptor, digest);
-  if (duplicate !== null) {
+  let existing: CommitOutcome | null;
+  try {
+    existing = await inspectExistingBundle(env.DB, descriptor, digest);
+  } catch {
+    throw new HttpError(503, "storage_unavailable", "Bundle index is unavailable", true);
+  }
+  if (existing?.kind === "duplicate") {
     await opened.body.cancel("duplicate Bundle").catch(() => undefined);
-    return { status: 200, receipt: duplicate };
+    return { status: 200, receipt: existing.receipt };
+  }
+  if (existing?.kind === "conflict") {
+    throw conflictError(existing.reason);
   }
 
   const objectWrite = await putConditionally(env, opened, digest);
   const now = deps.now();
+  let outcome: CommitOutcome;
   try {
-    await commitDescriptor(env, descriptor, digest, now, objectWrite.storedAtMs);
-  } catch {
-    const bundle = await existingByBundleId(env, descriptor.bundleId).catch(() => null);
-    if (bundle !== null) {
-      if (bundle.bundle_sha256 === digest) {
-        return { status: 200, receipt: duplicateReceipt(bundle) };
-      }
-      throw new HttpError(409, "bundle_id_conflict", "Bundle ID already has different bytes", false);
-    }
-    const runBundle = await bundleForRun(env, descriptor.runId).catch(() => null);
-    if (runBundle !== null && runBundle !== descriptor.bundleId) {
-      if (objectWrite.created) {
-        await env.BUNDLE_BUCKET.delete(descriptor.objectKey).catch(() => undefined);
-      }
-      throw new HttpError(409, "run_already_bundled", "Run already belongs to another Bundle", false);
-    }
-    logError("bundle.ingest.orphan", {
-      request_id: requestId,
-      bundle_id: descriptor.bundleId,
-      object_key: descriptor.objectKey,
+    outcome = await commitBundle(env.DB, descriptor, digest, {
+      availableAtMs: now,
+      storedAtMs: objectWrite.storedAtMs,
     });
-    throw new HttpError(503, "storage_unavailable", "Bundle index commit failed", true);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 503) {
+      logError("bundle.ingest.orphan", {
+        request_id: requestId,
+        bundle_id: descriptor.bundleId,
+        object_key: descriptor.objectKey,
+      });
+    }
+    throw error;
+  }
+  if (outcome.kind === "duplicate") {
+    return { status: 200, receipt: outcome.receipt };
+  }
+  if (outcome.kind === "conflict") {
+    if (outcome.reason === "run_already_bundled" && objectWrite.created) {
+      await env.BUNDLE_BUCKET.delete(descriptor.objectKey).catch(() => undefined);
+    }
+    throw conflictError(outcome.reason);
   }
 
   logEvent("bundle.ingest", {

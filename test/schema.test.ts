@@ -1,6 +1,30 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
+import type { ValidatedBundleDescriptor } from "../src/bundle/manifest";
+import { openBundle } from "../src/bundle/open";
+import { commitBundle } from "../src/modules/bundle-commit";
+import { makeBundleFixture, type BundleFixtureOptions } from "./fixtures/bundle";
+
+function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+async function bundleData(options: BundleFixtureOptions): Promise<{
+  descriptor: ValidatedBundleDescriptor;
+  digest: string;
+}> {
+  const fixture = await makeBundleFixture(options);
+  const opened = await openBundle(stream(fixture.body), fixture.body.byteLength, null);
+  await opened.body.pipeTo(new WritableStream<Uint8Array>());
+  return { descriptor: opened.descriptor, digest: await opened.digest };
+}
+
 test("the initial migration creates only the V5 domain tables", async () => {
   const result = await env.DB.prepare(
     `
@@ -123,6 +147,47 @@ describe("V5 relational constraints", () => {
       await env.DB.prepare(
         `SELECT player_account_id FROM bundle_uploaders WHERE player_account_id = 'schema-uploader'`,
       ).first(),
+    ).toBeNull();
+  });
+
+  test("commitBundle exposes D1 batch rollback through its public interface", async () => {
+    const times = { availableAtMs: 20, storedAtMs: 19 };
+    const seed = await bundleData({
+      bundleId: "01J00000000000000000000504",
+      runId: "schema-commit-seed-run",
+      uploaderAccountId: "schema-commit-seed-uploader",
+      battles: [],
+    });
+    const target = await bundleData({
+      bundleId: "01J00000000000000000000505",
+      runId: "schema-commit-target-run",
+      uploaderAccountId: "schema-commit-target-uploader",
+      battles: [],
+    });
+    await commitBundle(env.DB, seed.descriptor, seed.digest, times);
+    const collidingDescriptor = {
+      ...target.descriptor,
+      objectKey: seed.descriptor.objectKey,
+    };
+
+    await expect(
+      commitBundle(env.DB, collidingDescriptor, target.digest, times),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "storage_unavailable",
+      message: "Bundle index commit failed",
+    });
+    expect(
+      await env.DB.prepare(`SELECT bundle_id FROM bundles WHERE bundle_id = ?1`)
+        .bind(target.descriptor.bundleId)
+        .first(),
+    ).toBeNull();
+    expect(
+      await env.DB.prepare(
+        `SELECT player_account_id FROM bundle_uploaders WHERE player_account_id = ?1`,
+      )
+        .bind(target.descriptor.uploaderAccountId)
+        .first(),
     ).toBeNull();
   });
 });

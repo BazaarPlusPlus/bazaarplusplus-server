@@ -109,4 +109,30 @@ describe("POST /bundles", () => {
 
     expect(responses.map(({ status }) => status).sort()).toEqual([200, 201]);
   });
+
+  test("reports created then existing for one Screenshot Bundle", async () => {
+    const fixture = await makeBundleFixture({
+      bundleId: "01J00000000000000000000006",
+      runId: "run-006",
+      screenshotBytes: new Uint8Array([0xff, 0xd8, 6, 0xff, 0xd9]),
+      battles: [],
+    });
+    const first = await worker.fetch(uploadRequest(fixture.body, fixture.headers), env);
+    const duplicate = await worker.fetch(uploadRequest(fixture.body, fixture.headers), env);
+
+    expect(first.status).toBe(201);
+    expect(await first.json()).toEqual({
+      bundle_id: "01J00000000000000000000006",
+      run_id: "run-006",
+      outcome: "stored",
+      bazaardb_delivery: "created",
+    });
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toEqual({
+      bundle_id: "01J00000000000000000000006",
+      run_id: "run-006",
+      outcome: "duplicate",
+      bazaardb_delivery: "existing",
+    });
+  });
 });
