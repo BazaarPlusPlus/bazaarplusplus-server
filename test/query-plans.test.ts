@@ -85,11 +85,11 @@ describe("critical D1 query plans", () => {
     expect(claimUpdate).toContain("idx_bazaardb_claimable");
 
     const active = await plan(
-      `SELECT bundle_id FROM bazaardb_deliveries INDEXED BY idx_bazaardb_active_claim
-       WHERE delivery_state = 'pending' AND active_claim_id = ?1`,
+      `SELECT bundle_id, delivery_attempts FROM bazaardb_deliveries
+       WHERE active_claim_id = ?1 AND delivery_state = 'pending'`,
       ["claim"],
     );
-    expect(active).toContain("idx_bazaardb_active_claim");
+    expect(active).toContain("idx_bazaardb_active_claim_order");
 
     const activeOrder = await plan(
       `SELECT bundle_id FROM bazaardb_deliveries INDEXED BY idx_bazaardb_active_claim_order
@@ -182,15 +182,37 @@ describe("critical D1 query plans", () => {
     expect(detail).toMatch(/PRIMARY KEY|sqlite_autoindex_bazaardb_deliveries_1/);
   });
 
-  test("claim-time R2 expiry uses its stored-time index without a temporary sort", async () => {
-    const stored = await plan(
-      `SELECT bundle_id
-       FROM bundles INDEXED BY idx_bundles_stored_retention
-       WHERE stored_at_ms < ?1
-       ORDER BY stored_at_ms, bundle_id LIMIT 100`,
-      [1],
+  test("claim-time R2 expiry drives from pending deliveries, not Bundle history", async () => {
+    const converged = await plan(
+      `UPDATE bazaardb_deliveries
+       SET delivery_state = 'failed',
+           active_claim_id = NULL,
+           active_claim_order = NULL,
+           state_updated_at_ms = ?1,
+           failed_at_ms = ?1,
+           failure_reason = 'bundle_expired'
+       WHERE delivery_state = 'pending'
+         AND bundle_id IN (
+           SELECT d.bundle_id
+           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_claimable
+           JOIN bundles AS b ON b.bundle_id = d.bundle_id
+           WHERE d.delivery_state = 'pending'
+             AND d.delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
+             AND b.stored_at_ms < ?2
+           UNION ALL
+           SELECT d.bundle_id
+           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_exhausted_lease
+           JOIN bundles AS b ON b.bundle_id = d.bundle_id
+           WHERE d.delivery_state = 'pending'
+             AND d.delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
+             AND d.active_claim_id IS NOT NULL
+             AND b.stored_at_ms < ?2
+         )`,
+      [1, 0],
     );
-    expect(stored).toContain("idx_bundles_stored_retention");
-    expect(stored).not.toContain("TEMP B-TREE");
+    expect(converged).toContain("idx_bazaardb_claimable");
+    expect(converged).toContain("idx_bazaardb_exhausted_lease");
+    expect(converged).toMatch(/PRIMARY KEY|sqlite_autoindex_bundles_1/);
+    expect(converged).not.toContain("idx_bundles_stored_retention");
   });
 });

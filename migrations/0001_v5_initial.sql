@@ -128,10 +128,6 @@ CREATE INDEX idx_bazaardb_claimable
   ON bazaardb_deliveries(claimable_at_ms, created_at_ms, bundle_id)
   WHERE delivery_state = 'pending' AND delivery_attempts < 3;
 
-CREATE INDEX idx_bazaardb_active_claim
-  ON bazaardb_deliveries(active_claim_id, bundle_id)
-  WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;
-
 CREATE INDEX idx_bazaardb_active_claim_order
   ON bazaardb_deliveries(active_claim_id, active_claim_order, bundle_id)
   WHERE delivery_state = 'pending' AND active_claim_id IS NOT NULL;

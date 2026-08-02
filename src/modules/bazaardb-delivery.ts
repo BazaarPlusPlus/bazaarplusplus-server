@@ -77,6 +77,17 @@ async function compensateClaim(env: Env, claimId: string, now: number): Promise<
   ]);
 }
 
+// The attempt predicates under INDEXED BY interpolate MAX_DELIVERY_ATTEMPTS as a
+// compile-time literal and must never become bound parameters: D1 answers
+// "no query solution" for a partial index + INDEXED BY + bound predicate.
+// test/query-plans.test.ts mirrors these statements and must change in the same commit.
+//
+// Expiry convergence drives from the pending-delivery partial indexes and probes
+// each Bundle by primary key, so its reads scale with the pending backlog rather
+// than with the ever-growing Bundle history (D1 retention is manual). Every
+// reachable pending row is in exactly one of the two partial indexes: claim caps
+// delivery_attempts at MAX_DELIVERY_ATTEMPTS and always sets the lease, and
+// settle never leaves an exhausted row pending.
 function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatement {
   return db
     .prepare(
@@ -89,18 +100,25 @@ function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatemen
            failure_reason = 'bundle_expired'
        WHERE delivery_state = 'pending'
          AND bundle_id IN (
-           SELECT bundle_id
-           FROM bundles INDEXED BY idx_bundles_stored_retention
-           WHERE stored_at_ms < ?2
+           SELECT d.bundle_id
+           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_claimable
+           JOIN bundles AS b ON b.bundle_id = d.bundle_id
+           WHERE d.delivery_state = 'pending'
+             AND d.delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
+             AND b.stored_at_ms < ?2
+           UNION ALL
+           SELECT d.bundle_id
+           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_exhausted_lease
+           JOIN bundles AS b ON b.bundle_id = d.bundle_id
+           WHERE d.delivery_state = 'pending'
+             AND d.delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
+             AND d.active_claim_id IS NOT NULL
+             AND b.stored_at_ms < ?2
          )`,
     )
     .bind(now, now - R2_RETENTION_MS);
 }
 
-// The attempt predicates under INDEXED BY interpolate MAX_DELIVERY_ATTEMPTS as a
-// compile-time literal and must never become bound parameters: D1 answers
-// "no query solution" for a partial index + INDEXED BY + bound predicate.
-// test/query-plans.test.ts mirrors these statements and must change in the same commit.
 function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedStatement {
   return db
     .prepare(

@@ -126,7 +126,10 @@ export async function collectBundles(
        ORDER BY available_at_ms ASC, bundle_id ASC
        LIMIT ?5`,
     )
-      .bind(from, before, afterTime, afterId, limit + 1)
+      // ?1 seeks the index at the keyset position when present (validation above
+      // guarantees afterTime >= from), so a page reads O(limit) index entries
+      // instead of rescanning the window from its start on every page.
+      .bind(afterTime ?? from, before, afterTime, afterId, limit + 1)
       .all<CollectionRow>();
     rows = result.results;
   } catch {
