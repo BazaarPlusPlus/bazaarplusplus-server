@@ -4,8 +4,8 @@ import {
   MAX_PROJECTION_BYTES,
   MAX_RUN_BYTES,
   MAX_SCREENSHOT_BYTES,
-} from "../domain/limits";
-import { HttpError, invalidBundle } from "../http/errors";
+} from "../limits";
+import { HttpError, invalidBundle } from "../errors";
 import { toHex } from "./hex";
 import type {
   CombatantProjection,

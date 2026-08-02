@@ -1,5 +1,5 @@
 import type { HandlerDeps } from "../../src/http/deps";
-import type { BundleDownloadSigner } from "../../src/r2/presigner";
+import type { BundleDownloadSigner } from "../../src/presigner";
 import { RecordingBundleDownloadSigner } from "./presigner";
 
 interface TestDepsOptions {

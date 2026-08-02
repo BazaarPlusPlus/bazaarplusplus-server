@@ -4,12 +4,12 @@ import {
   SYNC_MAX_LIMIT,
   SYNC_MAX_LOOKBACK_MS,
   SYNC_SETTLE_LAG_MS,
-} from "../domain/limits";
+} from "../limits";
 import type { Env } from "../env";
 import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../http/errors";
+import { HttpError } from "../errors";
 import { logEvent } from "../observability";
-import { signDownloadPage } from "../r2/presigner";
+import { signDownloadPage } from "../presigner";
 
 interface CollectionRow {
   bundle_id: string;

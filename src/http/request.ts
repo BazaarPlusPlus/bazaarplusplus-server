@@ -1,4 +1,4 @@
-import { HttpError } from "./errors";
+import { HttpError } from "../errors";
 
 const MAX_JSON_BYTES = 65_536;
 

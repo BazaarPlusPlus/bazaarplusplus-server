@@ -1,5 +1,5 @@
 import type { ValidatedBundleDescriptor } from "../bundle/manifest";
-import { HttpError } from "../http/errors";
+import { HttpError } from "../errors";
 import { logEvent } from "../observability";
 
 export interface BundleReceipt {

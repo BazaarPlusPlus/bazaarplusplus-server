@@ -41,3 +41,5 @@ Lazy delivery convergence is claim-only. `POST /bazaardb/deliveries/claim` marks
 ## Historical plan drift
 
 The historical plans `docs/plans/2026-08-02-v5-cross-repo-joint-design.md` and `docs/plans/2026-08-02-v5-server-implementation.md` remain design records, not a current source map. Their illustrative `src/` layout predates the route shell, dependency seam, Bundle opener, and Bundle commit module. The three-argument handler signatures shown in the server implementation plan also predate the required `HandlerDeps` fourth argument. Current source and this ADR define these internal seams; the historical plans continue to describe the V5 product and wire constraints where they have not drifted.
+
+Historical plans also reference `src/domain/limits.ts`, `src/r2/presigner.ts`, and `src/http/errors.ts`. These cross-cutting single-file directories were flattened to `src/limits.ts`, `src/presigner.ts`, and `src/errors.ts`; moving `HttpError` out of `src/http/` also made the directory dependency graph one-directional (`http` → `modules` → `bundle`/`presigner` → `errors`/`limits`). Module boundaries and interfaces are unchanged.

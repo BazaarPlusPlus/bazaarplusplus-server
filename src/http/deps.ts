@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import {
   createBundleDownloadSigner,
   type BundleDownloadSigner,
-} from "../r2/presigner";
+} from "../presigner";
 
 export interface HandlerDeps {
   readonly signer: BundleDownloadSigner;

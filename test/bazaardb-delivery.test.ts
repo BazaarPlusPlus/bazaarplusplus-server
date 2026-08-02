@@ -5,7 +5,7 @@ import worker from "../src/index";
 import {
   CLAIM_LEASE_MS,
   DELIVERY_RETRY_BACKOFF_MS,
-} from "../src/domain/limits";
+} from "../src/limits";
 import {
   claimDeliveries,
   settleDeliveries,

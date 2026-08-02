@@ -1,7 +1,7 @@
 import type { Env } from "../env";
-import { MAX_BUNDLE_BYTES } from "../domain/limits";
+import { MAX_BUNDLE_BYTES } from "../limits";
 import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../http/errors";
+import { HttpError } from "../errors";
 import { logError, logEvent } from "../observability";
 import { toHex } from "../bundle/hex";
 import { openBundle, type OpenedBundle } from "../bundle/open";

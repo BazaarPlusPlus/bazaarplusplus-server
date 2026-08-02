@@ -7,7 +7,7 @@ import {
   DELIVERY_RETRY_BACKOFF_MS,
   MAX_BATTLES_PER_BUNDLE,
   MAX_DELIVERY_ATTEMPTS,
-} from "../src/domain/limits";
+} from "../src/limits";
 
 function compact(sql: string): string {
   return sql.replace(/\s+/g, " ");

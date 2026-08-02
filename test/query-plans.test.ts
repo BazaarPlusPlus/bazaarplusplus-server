@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import {
   DELIVERY_RETRY_BACKOFF_MS,
   MAX_DELIVERY_ATTEMPTS,
-} from "../src/domain/limits";
+} from "../src/limits";
 
 async function plan(sql: string, bindings: unknown[] = []): Promise<string> {
   const result = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...bindings).all<{

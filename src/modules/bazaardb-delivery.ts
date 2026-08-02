@@ -7,13 +7,13 @@ import {
   MAX_DELIVERY_ATTEMPTS,
   R2_RETENTION_MS,
   SETTLE_MAX_RESULTS,
-} from "../domain/limits";
+} from "../limits";
 import type { Env } from "../env";
 import type { HandlerDeps } from "../http/deps";
-import { HttpError } from "../http/errors";
+import { HttpError } from "../errors";
 import { readJsonObject } from "../http/request";
 import { logEvent } from "../observability";
-import { signDownloadPage } from "../r2/presigner";
+import { signDownloadPage } from "../presigner";
 
 interface ClaimRow {
   bundle_id: string;

@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import {
   createBundleDownloadSigner,
   signDownloadPage,
-} from "../src/r2/presigner";
+} from "../src/presigner";
 import {
   RecordingBundleDownloadSigner,
   RejectingBundleDownloadSigner,

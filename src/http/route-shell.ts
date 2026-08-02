@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { authenticateServiceToken, type ServiceScope } from "./auth";
 import { createHandlerDeps, type HandlerDeps } from "./deps";
-import { HttpError } from "./errors";
+import { HttpError } from "../errors";
 import { jsonError, jsonResponse } from "./json";
 import { logError } from "../observability";
 

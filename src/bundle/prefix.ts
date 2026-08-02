@@ -1,5 +1,5 @@
-import { MAX_MANIFEST_BYTES } from "../domain/limits";
-import { HttpError, invalidBundle } from "../http/errors";
+import { MAX_MANIFEST_BYTES } from "../limits";
+import { HttpError, invalidBundle } from "../errors";
 
 export const BUNDLE_PREFIX_BYTES = 16;
 export const BUNDLE_MAGIC = "BPPBNDL5";

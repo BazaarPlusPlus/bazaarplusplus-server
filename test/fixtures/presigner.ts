@@ -1,7 +1,7 @@
 import type {
   BundleDownloadSigner,
   SignedBundleDownload,
-} from "../../src/r2/presigner";
+} from "../../src/presigner";
 
 export class RecordingBundleDownloadSigner implements BundleDownloadSigner {
   readonly calls: Array<{ objectKey: string; issuedAtMs: number }> = [];
