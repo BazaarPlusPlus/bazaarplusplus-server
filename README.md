@@ -1,51 +1,39 @@
 # BazaarPlusPlus Server V5
 
-Standalone Cloudflare Worker for the BazaarPlusPlus V5 Bundle pipeline. It uses an independent Worker, D1 database, R2 bucket, migration lineage, and wire contract.
+Cloudflare Worker for the BazaarPlusPlus V5 Bundle pipeline. It receives completed game-run Bundles and makes them discoverable to trusted analyzers, Ghost Battle clients, and BazaarDB. The deployment is fully standalone: its own Worker, D1 database, R2 bucket, migration lineage, and wire contract.
 
-One immutable Bundle contains exactly one Run and zero or one Screenshot. The Worker never decompresses Run payloads and never proxies Bundle downloads.
+A Bundle is the immutable unit of upload, storage, and delivery — exactly one Run plus at most one optional Screenshot. Three properties shape everything else:
 
-## Interfaces
+- **Request-driven only.** The Worker exports only `fetch`. There is no cron and no background job: delivery maintenance converges lazily on claim traffic, and D1 retention is an explicit operator action.
+- **Streaming, not buffering.** Ingest buffers only the fixed prefix and the bounded manifest; Run and Screenshot bytes stream through incremental digest validation into a single conditional R2 PUT and are never decompressed.
+- **No download proxy.** Every consumer downloads the same complete Bundle directly from R2 through a seven-day presigned `GET` URL, inside a 14-day R2 lifecycle window.
 
-- `GET /health`: liveness;
-- `POST /bundles`: public streaming Bundle ingest;
-- `GET /bundles`: token-protected analyzer time-window sync;
-- `GET /ghost-battles`: public five-day Ghost discovery with per-IP rate limiting;
-- `POST /bazaardb/deliveries/claim`: token-protected ten-minute delivery leases;
-- `POST /bazaardb/deliveries/settle`: idempotent per-attempt delivery settlement.
+The public surface is six routes: liveness, public streaming ingest, token-protected analyzer sync, rate-limited Ghost discovery, and the BazaarDB claim/settle pair. The wire contract is [docs/api-reference.md](docs/api-reference.md); the binary Bundle format and its golden vectors are [contracts/v5](contracts/v5); the domain language is [CONTEXT.md](CONTEXT.md).
 
-Discovery returns seven-day R2 SigV4 `GetObject` URLs. R2 lifecycle retention is 14 days. An R2-only object left by a failed D1 commit is recovered only by an idempotent client upload retry; otherwise the bucket lifecycle expires it. The Worker exports no scheduled handler and performs no automatic D1 cleanup; D1 maintenance is an operator action. The complete interface is documented in [docs/api-reference.md](docs/api-reference.md), and the Bundle contract and golden vectors are in [contracts/v5](contracts/v5).
+## Architecture
 
-## Local development
+The design is a small number of deep seams, recorded in [ADR 0001](docs/adr/0001-v5-deepening-seams.md):
+
+- `src/http/routes.ts` is the complete public route table, and `src/http/route-shell.ts` is the sole HTTP exit — it owns path and method resolution, authentication ordering, CORS, JSON envelopes, and request IDs. Handlers return status and body data, never a `Response`.
+- `src/http/deps.ts` is the single dependency channel. Every handler has the form `(request, env, requestId, deps)`, so tests replace the clock and the download signer through one object without touching Worker bindings.
+- `src/bundle/open.ts` owns Bundle opening: bounded prefix and manifest reads, manifest validation, and streaming digest validation, all behind one `openBundle` call.
+- `src/modules/bundle-commit.ts` owns immutable-identity decisions and the atomic D1 commit, while `src/modules/bundle-ingest.ts` owns R2 orchestration and orphan recovery.
+
+`test/` mirrors the `src/` layout (`http/`, `bundle/`, `modules/`), with golden-vector contract tests under `test/contracts/` and migration, schema, and root-module tests at the top level.
+
+## Development
 
 ```sh
 npm install
-npm run check
-npm test
-npm run dev
+npm run check   # tsc over src and tests, then Biome lint and format verification
+npm test        # Vitest in the Workers pool with real local D1 migrations and R2
+npm run dev     # wrangler dev; requires .dev.vars (below)
 ```
 
-Tests run in the Cloudflare Workers Vitest pool with real local D1 migrations and R2 bindings. `npm run check` type-checks production and test code, then lints and verifies formatting with Biome; `npm run format` rewrites files in place.
+`npm run format` rewrites files in place. `npm run dev` needs a git-ignored `.dev.vars` file supplying `R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, and `BAZAARDB_DELIVERY_TOKEN`; the Worker fails closed without them. Tests inject their own values and need no `.dev.vars`.
 
-`npm run dev` requires a git-ignored `.dev.vars` file providing the three secrets listed under Production configuration (`R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, `BAZAARDB_DELIVERY_TOKEN`); the Worker fails closed without them. Tests inject their own values and need no `.dev.vars`.
+## Production
 
-## Code layout
+`src/env.ts` is the sole binding declaration. `wrangler.toml` provisions the D1 database, the R2 bucket, the Ghost rate limiter (60 calls per 60 seconds), and the presign vars; the three secrets above are set out of band. The two service tokens are distinct 32-byte random values encoded as 43-character unpadded base64url strings, and the R2 S3 credential grants Object Read only on the V5 bucket.
 
-`src/http/routes.ts` is the route table, and `src/http/route-shell.ts` is the sole HTTP exit.
-`src/bundle/open.ts` owns Bundle opening and streaming validation.
-`src/modules/bundle-commit.ts` owns Bundle persistence decisions and the atomic D1 commit.
-
-`test/` mirrors the `src/` layout (`http/`, `bundle/`, `modules/`), with contract golden-vector tests in `test/contracts/` and migration, schema, and root-module tests at the top level.
-
-## Production configuration
-
-`src/env.ts` is the sole binding declaration. Wrangler provides:
-
-- `DB`: `bazaarplusplus-mod-api-v5-db`;
-- `BUNDLE_BUCKET`: `bazaarplusplus-bundle-v5`;
-- `GHOST_BATTLE_RATE_LIMITER`: 60 calls per 60 seconds;
-- `BUNDLE_BUCKET_NAME`, `R2_ACCOUNT_ID`, and `R2_PRESIGN_ACCESS_KEY_ID` vars;
-- `R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, and `BAZAARDB_DELIVERY_TOKEN` secrets.
-
-The two service tokens are distinct 32-byte random values encoded as 43-character unpadded base64url strings. The R2 S3 credential grants Object Read only on the V5 bucket.
-
-The checked-in D1 database ID and presign values are placeholders. Provisioning, migration, lifecycle, deploy, and smoke-test commands are in [docs/deployment-runbook.md](docs/deployment-runbook.md). They require explicit Cloudflare deployment authorization.
+The checked-in D1 database ID and presign values are placeholders. Provisioning, migration, lifecycle, deploy, and smoke-test commands are in [docs/deployment-runbook.md](docs/deployment-runbook.md) and require explicit Cloudflare deployment authorization.
