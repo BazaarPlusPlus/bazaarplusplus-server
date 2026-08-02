@@ -97,6 +97,10 @@ function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatemen
     .bind(now, now - R2_RETENTION_MS);
 }
 
+// The attempt predicates under INDEXED BY interpolate MAX_DELIVERY_ATTEMPTS as a
+// compile-time literal and must never become bound parameters: D1 answers
+// "no query solution" for a partial index + INDEXED BY + bound predicate.
+// test/query-plans.test.ts mirrors these statements and must change in the same commit.
 function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedStatement {
   return db
     .prepare(
@@ -199,6 +203,8 @@ export async function claimDeliveries(
 ): Promise<Record<string, unknown>> {
   const body = await readJsonObject(request);
   const limit = claimLimit(body.limit);
+  // Read the signer before the D1 claim batch: an invalid presign configuration
+  // must fail here with zero D1 writes, not after Bundles are already claimed.
   const signer = deps.signer;
   const now = deps.now();
   const expiresAt = now + CLAIM_LEASE_MS;

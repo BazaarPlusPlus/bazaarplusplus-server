@@ -38,8 +38,10 @@ Lazy delivery convergence is claim-only. `POST /bazaardb/deliveries/claim` marks
 - Bundle validation and D1 commit decisions can be tested through public module interfaces.
 - Delivery maintenance occurs on claim traffic or through explicit operator action, never through settle or a scheduled Worker handler.
 
-## Historical plan drift
+## Source layout
 
-The historical plans `docs/plans/2026-08-02-v5-cross-repo-joint-design.md` and `docs/plans/2026-08-02-v5-server-implementation.md` remain design records, not a current source map. Their illustrative `src/` layout predates the route shell, dependency seam, Bundle opener, and Bundle commit module. The three-argument handler signatures shown in the server implementation plan also predate the required `HandlerDeps` fourth argument. Current source and this ADR define these internal seams; the historical plans continue to describe the V5 product and wire constraints where they have not drifted.
+Cross-cutting single-file directories were flattened to `src/limits.ts`, `src/presigner.ts`, and `src/errors.ts`; moving `HttpError` out of `src/http/` made the directory dependency graph one-directional (`http` → `modules` → `bundle`/`presigner` → `errors`/`limits`). `test/` mirrors the `src/` layout. Module boundaries and interfaces are unchanged by layout.
 
-Historical plans also reference `src/domain/limits.ts`, `src/r2/presigner.ts`, and `src/http/errors.ts`. These cross-cutting single-file directories were flattened to `src/limits.ts`, `src/presigner.ts`, and `src/errors.ts`; moving `HttpError` out of `src/http/` also made the directory dependency graph one-directional (`http` → `modules` → `bundle`/`presigner` → `errors`/`limits`). Module boundaries and interfaces are unchanged.
+## Historical plans
+
+The pre-implementation planning documents that lived under `docs/plans/` were process artifacts; their durable decisions are captured by this ADR, current source, `docs/api-reference.md`, and `contracts/v5/`. They were removed from the tree and remain available in git history.

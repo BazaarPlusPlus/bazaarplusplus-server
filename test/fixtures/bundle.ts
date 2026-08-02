@@ -14,6 +14,8 @@ export interface BundleFixtureOptions {
   battles?: unknown[];
 }
 
+// Deliberately local: fixtures must not import the digest/hex helpers they
+// exist to verify, or a bug in src would corrupt fixtures and tests together.
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
