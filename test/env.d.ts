@@ -19,3 +19,11 @@ declare module "*?raw" {
   const content: string;
   export default content;
 }
+
+type WorkerEnv = import("../src/env").Env;
+type Assignable<Target, Source extends Target> = Source;
+type _CloudflareEnvIncludesWorkerEnv = Assignable<WorkerEnv, Cloudflare.Env>;
+type _WorkerEnvMatchesCloudflareEnv = Assignable<
+  Omit<Cloudflare.Env, "TEST_MIGRATIONS">,
+  WorkerEnv
+>;
