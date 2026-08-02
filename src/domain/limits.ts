@@ -17,4 +17,7 @@ export const CLAIM_LEASE_MS = 600_000;
 export const CLAIM_DEFAULT_LIMIT = 50;
 export const CLAIM_MAX_LIMIT = 50;
 export const MAX_DELIVERY_ATTEMPTS = 3;
+// The schedule has one delay between each pair of allowed attempts.
+// Its length must remain MAX_DELIVERY_ATTEMPTS - 1.
+export const DELIVERY_RETRY_BACKOFF_MS = [60_000, 300_000] as const;
 export const SETTLE_MAX_RESULTS = 50;

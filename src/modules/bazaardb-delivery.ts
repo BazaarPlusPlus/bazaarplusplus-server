@@ -3,6 +3,8 @@ import {
   CLAIM_DEFAULT_LIMIT,
   CLAIM_LEASE_MS,
   CLAIM_MAX_LIMIT,
+  DELIVERY_RETRY_BACKOFF_MS,
+  MAX_DELIVERY_ATTEMPTS,
   R2_RETENTION_MS,
   SETTLE_MAX_RESULTS,
 } from "../domain/limits";
@@ -28,6 +30,10 @@ interface SettleInput {
   reason: string | null;
 }
 
+interface IndexedSettleInput extends SettleInput {
+  index: number;
+}
+
 interface ReceiptRow {
   claim_id: string | null;
   bundle_id: string | null;
@@ -36,6 +42,11 @@ interface ReceiptRow {
   delivery_state: "pending" | "done" | "failed" | null;
   active_claim_id: string | null;
   claimable_at_ms: number | null;
+}
+
+interface SettleItemPair {
+  statements: readonly [D1PreparedStatement, D1PreparedStatement];
+  deliveryApplied(writes: readonly D1Result<unknown>[]): boolean;
 }
 
 function claimLimit(value: unknown): number {
@@ -62,6 +73,120 @@ async function compensateClaim(env: Env, claimId: string, now: number): Promise<
   ]);
 }
 
+function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE bazaardb_deliveries
+       SET delivery_state = 'failed',
+           active_claim_id = NULL,
+           active_claim_order = NULL,
+           state_updated_at_ms = ?1,
+           failed_at_ms = ?1,
+           failure_reason = 'bundle_expired'
+       WHERE delivery_state = 'pending'
+         AND bundle_id IN (
+           SELECT bundle_id
+           FROM bundles INDEXED BY idx_bundles_stored_retention
+           WHERE stored_at_ms < ?2
+         )`,
+    )
+    .bind(now, now - R2_RETENTION_MS);
+}
+
+function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE bazaardb_deliveries
+       SET delivery_state = 'failed',
+           active_claim_id = NULL,
+           active_claim_order = NULL,
+           state_updated_at_ms = ?1,
+           failed_at_ms = ?1,
+           failure_reason = 'delivery_attempts_exhausted'
+       WHERE bundle_id IN (
+         SELECT bundle_id
+         FROM bazaardb_deliveries INDEXED BY idx_bazaardb_exhausted_lease
+         WHERE delivery_state = 'pending'
+           AND delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
+           AND active_claim_id IS NOT NULL
+           AND claimable_at_ms <= ?1
+       )`,
+    )
+    .bind(now);
+}
+
+function claimDeliveryPage(
+  db: D1Database,
+  now: number,
+  claimId: string,
+  expiresAt: number,
+  limit: number,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `WITH candidates AS MATERIALIZED (
+         SELECT
+           bundle_id,
+           ROW_NUMBER() OVER (
+             ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
+           ) - 1 AS claim_order
+         FROM bazaardb_deliveries INDEXED BY idx_bazaardb_claimable
+         WHERE delivery_state = 'pending'
+           AND delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
+           AND claimable_at_ms <= ?1
+         ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
+         LIMIT ?4
+       )
+       UPDATE bazaardb_deliveries
+       SET active_claim_id = ?2,
+           active_claim_order = (
+             SELECT claim_order FROM candidates
+             WHERE candidates.bundle_id = bazaardb_deliveries.bundle_id
+           ),
+           claimable_at_ms = ?3,
+           delivery_attempts = delivery_attempts + 1,
+           state_updated_at_ms = ?1
+       WHERE bundle_id IN (SELECT bundle_id FROM candidates)
+         AND delivery_state = 'pending'
+         AND delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
+         AND claimable_at_ms <= ?1
+       RETURNING bundle_id, delivery_attempts`,
+    )
+    .bind(now, claimId, expiresAt, limit);
+}
+
+function insertAttemptReceipts(
+  db: D1Database,
+  claimId: string,
+  now: number,
+  expiresAt: number,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO bazaardb_delivery_attempts (
+         claim_id, bundle_id, attempt_number, claimed_at_ms, expires_at_ms
+       )
+       SELECT ?1, bundle_id, delivery_attempts, ?2, ?3
+       FROM bazaardb_deliveries
+       WHERE active_claim_id = ?1
+         AND delivery_state = 'pending'`,
+    )
+    .bind(claimId, now, expiresAt);
+}
+
+function loadClaimedBundles(db: D1Database, claimId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT b.bundle_id, b.run_id, b.object_key, b.bundle_sha256
+       FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_active_claim_order
+       JOIN bundles AS b ON b.bundle_id = d.bundle_id
+       WHERE d.active_claim_id = ?1
+         AND d.delivery_state = 'pending'
+       ORDER BY d.active_claim_order ASC, d.bundle_id ASC`,
+    )
+    .bind(claimId);
+}
+
 export async function claimDeliveries(
   request: Request,
   env: Env,
@@ -77,86 +202,13 @@ export async function claimDeliveries(
   let rows: ClaimRow[];
   try {
     const results = await env.DB.batch([
-      env.DB.prepare(
-        `UPDATE bazaardb_deliveries
-         SET delivery_state = 'failed',
-             active_claim_id = NULL,
-             active_claim_order = NULL,
-             state_updated_at_ms = ?1,
-             failed_at_ms = ?1,
-             failure_reason = 'bundle_expired'
-         WHERE delivery_state = 'pending'
-           AND bundle_id IN (
-             SELECT bundle_id
-             FROM bundles INDEXED BY idx_bundles_stored_retention
-             WHERE stored_at_ms < ?2
-           )`,
-      ).bind(now, now - R2_RETENTION_MS),
-      env.DB.prepare(
-        `UPDATE bazaardb_deliveries
-         SET delivery_state = 'failed',
-             active_claim_id = NULL,
-             active_claim_order = NULL,
-             state_updated_at_ms = ?1,
-             failed_at_ms = ?1,
-             failure_reason = 'delivery_attempts_exhausted'
-         WHERE bundle_id IN (
-           SELECT bundle_id
-           FROM bazaardb_deliveries INDEXED BY idx_bazaardb_exhausted_lease
-           WHERE delivery_state = 'pending'
-             AND delivery_attempts = 3
-             AND active_claim_id IS NOT NULL
-             AND claimable_at_ms <= ?1
-         )`,
-      ).bind(now),
-      env.DB.prepare(
-        `WITH candidates AS MATERIALIZED (
-           SELECT
-             bundle_id,
-             ROW_NUMBER() OVER (
-               ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
-             ) - 1 AS claim_order
-           FROM bazaardb_deliveries INDEXED BY idx_bazaardb_claimable
-           WHERE delivery_state = 'pending'
-             AND delivery_attempts < 3
-             AND claimable_at_ms <= ?1
-           ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
-           LIMIT ?4
-         )
-         UPDATE bazaardb_deliveries
-         SET active_claim_id = ?2,
-             active_claim_order = (
-               SELECT claim_order FROM candidates
-               WHERE candidates.bundle_id = bazaardb_deliveries.bundle_id
-             ),
-             claimable_at_ms = ?3,
-             delivery_attempts = delivery_attempts + 1,
-             state_updated_at_ms = ?1
-         WHERE bundle_id IN (SELECT bundle_id FROM candidates)
-           AND delivery_state = 'pending'
-           AND delivery_attempts < 3
-           AND claimable_at_ms <= ?1
-         RETURNING bundle_id, delivery_attempts`,
-      ).bind(now, claimId, expiresAt, limit),
-      env.DB.prepare(
-        `INSERT INTO bazaardb_delivery_attempts (
-           claim_id, bundle_id, attempt_number, claimed_at_ms, expires_at_ms
-         )
-         SELECT ?1, bundle_id, delivery_attempts, ?2, ?3
-         FROM bazaardb_deliveries
-         WHERE active_claim_id = ?1
-           AND delivery_state = 'pending'`,
-      ).bind(claimId, now, expiresAt),
-      env.DB.prepare(
-        `SELECT b.bundle_id, b.run_id, b.object_key, b.bundle_sha256
-         FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_active_claim_order
-         JOIN bundles AS b ON b.bundle_id = d.bundle_id
-         WHERE d.active_claim_id = ?1
-           AND d.delivery_state = 'pending'
-         ORDER BY d.active_claim_order ASC, d.bundle_id ASC`,
-      ).bind(claimId),
+      convergeExpiredBundles(env.DB, now),
+      convergeExhaustedAttempts(env.DB, now),
+      claimDeliveryPage(env.DB, now, claimId, expiresAt, limit),
+      insertAttemptReceipts(env.DB, claimId, now, expiresAt),
+      loadClaimedBundles(env.DB, claimId),
     ]);
-    rows = (results[4].results ?? []) as unknown as ClaimRow[];
+    rows = (results.at(-1)?.results ?? []) as unknown as ClaimRow[];
   } catch {
     throw new HttpError(503, "storage_unavailable", "BazaarDB claim transaction failed", true);
   }
@@ -235,6 +287,94 @@ function parseSettle(body: Record<string, unknown>): { claimId: string; results:
   return { claimId: body.claim_id, results };
 }
 
+function buildSettleItemPair(
+  db: D1Database,
+  claimId: string,
+  item: IndexedSettleInput,
+  now: number,
+): SettleItemPair {
+  const { index } = item;
+  const base = index * 2;
+  const attempt = db
+    .prepare(
+      `UPDATE bazaardb_delivery_attempts
+       SET settled_at_ms = ?4,
+           outcome = ?3,
+           reason = ?5
+       WHERE claim_id = ?1
+         AND bundle_id = ?2
+         AND outcome IS NULL
+         AND EXISTS (
+           SELECT 1
+           FROM bazaardb_deliveries AS d
+           WHERE d.bundle_id = ?2
+             AND d.delivery_state = 'pending'
+             AND d.active_claim_id = ?1
+             AND d.claimable_at_ms > ?4
+         )`,
+    )
+    .bind(claimId, item.bundleId, item.outcome, now, item.reason);
+  const delivery = db
+    .prepare(
+      `UPDATE bazaardb_deliveries
+       SET delivery_state = CASE
+             WHEN ?3 = 'accepted' THEN 'done'
+             WHEN ?3 = 'permanent_failure' THEN 'failed'
+             WHEN delivery_attempts >= ?6 THEN 'failed'
+             ELSE 'pending'
+           END,
+           active_claim_id = NULL,
+           active_claim_order = NULL,
+           claimable_at_ms = CASE
+             WHEN ?3 = 'retryable_failure' AND delivery_attempts = 1 THEN ?4 + ?7
+             WHEN ?3 = 'retryable_failure' AND delivery_attempts = 2 THEN ?4 + ?8
+             ELSE claimable_at_ms
+           END,
+           state_updated_at_ms = ?4,
+           delivered_at_ms = CASE WHEN ?3 = 'accepted' THEN ?4 ELSE NULL END,
+           failed_at_ms = CASE
+             WHEN ?3 = 'permanent_failure'
+               OR (?3 = 'retryable_failure' AND delivery_attempts >= ?6)
+               THEN ?4
+             ELSE NULL
+           END,
+           failure_reason = CASE
+             WHEN ?3 = 'permanent_failure' THEN ?5
+             WHEN ?3 = 'retryable_failure' AND delivery_attempts >= ?6
+               THEN 'delivery_attempts_exhausted'
+             ELSE NULL
+           END
+       WHERE bundle_id = ?2
+         AND delivery_state = 'pending'
+         AND active_claim_id = ?1
+         AND claimable_at_ms > ?4
+         AND EXISTS (
+           SELECT 1 FROM bazaardb_delivery_attempts AS a
+           WHERE a.claim_id = ?1
+             AND a.bundle_id = ?2
+             AND a.outcome = ?3
+             AND a.settled_at_ms = ?4
+             AND (a.reason = ?5 OR (a.reason IS NULL AND ?5 IS NULL))
+         )`,
+    )
+    .bind(
+      claimId,
+      item.bundleId,
+      item.outcome,
+      now,
+      item.reason,
+      MAX_DELIVERY_ATTEMPTS,
+      DELIVERY_RETRY_BACKOFF_MS[0],
+      DELIVERY_RETRY_BACKOFF_MS[1],
+    );
+  return {
+    statements: [attempt, delivery],
+    deliveryApplied(writes) {
+      return Number(writes.at(base + 1)?.meta.changes ?? 0) === 1;
+    },
+  };
+}
+
 export async function settleDeliveries(
   request: Request,
   env: Env,
@@ -243,69 +383,10 @@ export async function settleDeliveries(
 ): Promise<Record<string, unknown>> {
   const input = parseSettle(await readJsonObject(request));
   const now = deps.now();
-  const statements: D1PreparedStatement[] = [];
-  for (const result of input.results) {
-    statements.push(
-      env.DB.prepare(
-        `UPDATE bazaardb_delivery_attempts
-         SET settled_at_ms = ?4,
-             outcome = ?3,
-             reason = ?5
-         WHERE claim_id = ?1
-           AND bundle_id = ?2
-           AND outcome IS NULL
-           AND EXISTS (
-             SELECT 1
-             FROM bazaardb_deliveries AS d
-             WHERE d.bundle_id = ?2
-               AND d.delivery_state = 'pending'
-               AND d.active_claim_id = ?1
-               AND d.claimable_at_ms > ?4
-           )`,
-      ).bind(input.claimId, result.bundleId, result.outcome, now, result.reason),
-      env.DB.prepare(
-        `UPDATE bazaardb_deliveries
-         SET delivery_state = CASE
-               WHEN ?3 = 'accepted' THEN 'done'
-               WHEN ?3 = 'permanent_failure' THEN 'failed'
-               WHEN delivery_attempts >= 3 THEN 'failed'
-               ELSE 'pending'
-             END,
-             active_claim_id = NULL,
-             active_claim_order = NULL,
-             claimable_at_ms = CASE
-               WHEN ?3 = 'retryable_failure' AND delivery_attempts = 1 THEN ?4 + 60000
-               WHEN ?3 = 'retryable_failure' AND delivery_attempts = 2 THEN ?4 + 300000
-               ELSE claimable_at_ms
-             END,
-             state_updated_at_ms = ?4,
-             delivered_at_ms = CASE WHEN ?3 = 'accepted' THEN ?4 ELSE NULL END,
-             failed_at_ms = CASE
-               WHEN ?3 = 'permanent_failure' OR (?3 = 'retryable_failure' AND delivery_attempts >= 3)
-                 THEN ?4
-               ELSE NULL
-             END,
-             failure_reason = CASE
-               WHEN ?3 = 'permanent_failure' THEN ?5
-               WHEN ?3 = 'retryable_failure' AND delivery_attempts >= 3
-                 THEN 'delivery_attempts_exhausted'
-               ELSE NULL
-             END
-         WHERE bundle_id = ?2
-           AND delivery_state = 'pending'
-           AND active_claim_id = ?1
-           AND claimable_at_ms > ?4
-           AND EXISTS (
-             SELECT 1 FROM bazaardb_delivery_attempts AS a
-             WHERE a.claim_id = ?1
-               AND a.bundle_id = ?2
-               AND a.outcome = ?3
-               AND a.settled_at_ms = ?4
-               AND (a.reason = ?5 OR (a.reason IS NULL AND ?5 IS NULL))
-           )`,
-      ).bind(input.claimId, result.bundleId, result.outcome, now, result.reason),
-    );
-  }
+  const pairs = input.results.map((result, index) =>
+    buildSettleItemPair(env.DB, input.claimId, { ...result, index }, now),
+  );
+  const statements = pairs.flatMap(({ statements: pair }) => pair);
 
   let writes: D1Result<unknown>[];
   let receipts: ReceiptRow[];
@@ -355,7 +436,7 @@ export async function settleDeliveries(
     } else if (receipt.outcome !== result.outcome || receipt.reason !== result.reason) {
       status = "outcome_conflict";
       rejected += 1;
-    } else if (Number(writes[index * 2 + 1].meta.changes ?? 0) === 1) {
+    } else if (pairs[index].deliveryApplied(writes)) {
       status = "applied";
       applied += 1;
     } else {

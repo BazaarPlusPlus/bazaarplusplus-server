@@ -2,7 +2,14 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
-import { claimDeliveries } from "../src/modules/bazaardb-delivery";
+import {
+  CLAIM_LEASE_MS,
+  DELIVERY_RETRY_BACKOFF_MS,
+} from "../src/domain/limits";
+import {
+  claimDeliveries,
+  settleDeliveries,
+} from "../src/modules/bazaardb-delivery";
 import { makeBundleFixture, uploadRequest } from "./fixtures/bundle";
 import { FakeClock } from "./fixtures/clock";
 import { createTestDeps } from "./fixtures/deps";
@@ -294,5 +301,165 @@ describe("BazaarDB delivery claim and settle", () => {
 
     const result = await claim(3);
     expect(result.items.map(({ bundle_id }) => bundle_id)).toEqual([first, third, second]);
+  });
+
+  test("settles valid, stale, and unknown items independently in one request", async () => {
+    const [appliedId, staleId] = await Promise.all([
+      uploadScreenshotBundle(13),
+      uploadScreenshotBundle(14),
+    ]);
+    const leased = await claim(2);
+    expect(leased.items.map(({ bundle_id }) => bundle_id)).toEqual([appliedId, staleId]);
+    await env.DB.prepare(
+      `UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2`,
+    )
+      .bind(Date.now() - 1, staleId)
+      .run();
+    const response = await worker.fetch(
+      deliveryRequest("settle", {
+        claim_id: leased.claim_id,
+        results: [
+          { bundle_id: appliedId, outcome: "accepted" },
+          { bundle_id: staleId, outcome: "accepted" },
+          { bundle_id: "01J00000000000000000003998", outcome: "accepted" },
+        ],
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      items: [
+        { bundle_id: appliedId, status: "applied", state: "done" },
+        { bundle_id: staleId, status: "stale_claim", state: "pending" },
+        { bundle_id: "01J00000000000000000003998", status: "unknown_item", state: null },
+      ],
+      summary: { applied: 1, duplicate: 0, rejected: 2 },
+    });
+    await env.DB.batch(
+      [appliedId, staleId].map((bundleId) =>
+        env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId),
+      ),
+    );
+  });
+
+  test("treats a claim as stale at the injected lease boundary without changing rows", async () => {
+    const bundleId = await uploadScreenshotBundle(15);
+    const clock = new FakeClock(Date.now());
+    const deps = createTestDeps({
+      signer: new RecordingBundleDownloadSigner(),
+      now: clock.now,
+    });
+    const leased = await claimDeliveries(
+      deliveryRequest("claim", { limit: 1 }),
+      env,
+      "lease-boundary-claim",
+      deps,
+    );
+    const claimId = leased.claim_id as string;
+    const beforeDelivery = await env.DB.prepare(
+      `SELECT * FROM bazaardb_deliveries WHERE bundle_id = ?1`,
+    )
+      .bind(bundleId)
+      .first();
+    const beforeAttempt = await env.DB.prepare(
+      `SELECT * FROM bazaardb_delivery_attempts WHERE claim_id = ?1 AND bundle_id = ?2`,
+    )
+      .bind(claimId, bundleId)
+      .first();
+
+    clock.advance(CLAIM_LEASE_MS);
+    const settled = await settleDeliveries(
+      deliveryRequest("settle", {
+        claim_id: claimId,
+        results: [{ bundle_id: bundleId, outcome: "accepted" }],
+      }),
+      env,
+      "lease-boundary-settle",
+      deps,
+    );
+
+    expect(settled).toMatchObject({
+      items: [{ bundle_id: bundleId, status: "stale_claim", state: "pending" }],
+      summary: { applied: 0, duplicate: 0, rejected: 1 },
+    });
+    expect(
+      await env.DB.prepare(`SELECT * FROM bazaardb_deliveries WHERE bundle_id = ?1`)
+        .bind(bundleId)
+        .first(),
+    ).toEqual(beforeDelivery);
+    expect(
+      await env.DB.prepare(
+        `SELECT * FROM bazaardb_delivery_attempts WHERE claim_id = ?1 AND bundle_id = ?2`,
+      )
+        .bind(claimId, bundleId)
+        .first(),
+    ).toEqual(beforeAttempt);
+    await env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId).run();
+  });
+
+  test("opens each retry exactly at the injected backoff boundary", async () => {
+    const bundleId = await uploadScreenshotBundle(16);
+    const clock = new FakeClock(Date.now());
+    const deps = createTestDeps({
+      signer: new RecordingBundleDownloadSigner(),
+      now: clock.now,
+    });
+    const directClaim = async () =>
+      (await claimDeliveries(
+        deliveryRequest("claim", { limit: 1 }),
+        env,
+        "backoff-claim",
+        deps,
+      )) as {
+        claim_id: string | null;
+        items: Array<{ bundle_id: string }>;
+      };
+    const retry = async (claimId: string) =>
+      settleDeliveries(
+        deliveryRequest("settle", {
+          claim_id: claimId,
+          results: [{ bundle_id: bundleId, outcome: "retryable_failure", reason: "timeout" }],
+        }),
+        env,
+        "backoff-settle",
+        deps,
+      );
+
+    const first = await directClaim();
+    expect(first.items).toMatchObject([{ bundle_id: bundleId }]);
+    const firstSettle = await retry(first.claim_id!);
+    expect(firstSettle).toMatchObject({
+      items: [
+        {
+          status: "applied",
+          state: "pending",
+          next_claim_at_ms: clock.ms + DELIVERY_RETRY_BACKOFF_MS[0],
+        },
+      ],
+    });
+
+    clock.advance(DELIVERY_RETRY_BACKOFF_MS[0] - 1);
+    expect(await directClaim()).toMatchObject({ claim_id: null, items: [] });
+    clock.advance(1);
+    const second = await directClaim();
+    expect(second.items).toMatchObject([{ bundle_id: bundleId }]);
+    const secondSettle = await retry(second.claim_id!);
+    expect(secondSettle).toMatchObject({
+      items: [
+        {
+          status: "applied",
+          state: "pending",
+          next_claim_at_ms: clock.ms + DELIVERY_RETRY_BACKOFF_MS[1],
+        },
+      ],
+    });
+
+    clock.advance(DELIVERY_RETRY_BACKOFF_MS[1] - 1);
+    expect(await directClaim()).toMatchObject({ claim_id: null, items: [] });
+    clock.advance(1);
+    const third = await directClaim();
+    expect(third.items).toMatchObject([{ bundle_id: bundleId }]);
+    await env.DB.prepare(`DELETE FROM bundles WHERE bundle_id = ?1`).bind(bundleId).run();
   });
 });
