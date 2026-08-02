@@ -36,4 +36,4 @@ npm run dev     # wrangler dev; requires .dev.vars (below)
 
 `src/env.ts` is the sole binding declaration. `wrangler.toml` provisions the D1 database, the R2 bucket, the Ghost rate limiter (60 calls per 60 seconds), and the presign vars; the three secrets above are set out of band. The two service tokens are distinct 32-byte random values encoded as 43-character unpadded base64url strings, and the R2 S3 credential grants Object Read only on the V5 bucket.
 
-The checked-in D1 database ID and presign values are placeholders. Provisioning, migration, lifecycle, deploy, and smoke-test commands are in [docs/deployment-runbook.md](docs/deployment-runbook.md) and require explicit Cloudflare deployment authorization.
+Provisioning, migration, lifecycle, deploy, and smoke-test commands are in [docs/deployment-runbook.md](docs/deployment-runbook.md) and require explicit Cloudflare deployment authorization. The production D1 database and R2 bucket are provisioned, so schema changes from here on must ship as new migration files — the initial migration is frozen.
