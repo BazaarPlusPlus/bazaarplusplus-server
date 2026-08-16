@@ -235,7 +235,7 @@ Query fields:
 
 | Field | Required | Rules |
 |---|---|---|
-| `available_from_ms` | Yes | Inclusive, non-negative safe integer, no earlier than server time minus 14 days |
+| `available_from_ms` | Yes | Inclusive, non-negative safe integer, no earlier than server time minus 8 days |
 | `available_before_ms` | No | Exclusive; defaults to one fixed `server_now_ms - 60000`; may not be later than that settle point |
 | `limit` | No | Default 200; range 1–500 |
 | `after_available_at_ms` | As a pair | Last returned availability time, within the same window |
@@ -421,7 +421,7 @@ Per-item `status` is:
 
 `state` is `pending`, `done`, or `failed`, and is `null` for an unknown item. `next_claim_at_ms` is non-null only for pending work without an active lease. `summary.rejected` counts stale, conflicting, and unknown items.
 
-`accepted` becomes done. `permanent_failure` becomes failed. The first retryable failure waits 60 seconds, the second waits five minutes, and the third becomes failed with `delivery_attempts_exhausted`. Before selecting a claim page, `POST /bazaardb/deliveries/claim` also marks pending Bundles older than the 14-day R2 retention as `bundle_expired` and expired third leases as `delivery_attempts_exhausted`. Attempt receipts are immutable across later attempts, so response-loss retries remain idempotent.
+`accepted` becomes done. `permanent_failure` becomes failed. The first retryable failure waits 60 seconds, the second waits five minutes, and the third becomes failed with `delivery_attempts_exhausted`. Before selecting a claim page, `POST /bazaardb/deliveries/claim` also marks pending Bundles older than the 8-day R2 retention as `bundle_expired` and expired third leases as `delivery_attempts_exhausted`. Attempt receipts are immutable across later attempts, so response-loss retries remain idempotent.
 
 Route errors: `400 invalid_json`, `400 invalid_settle_request`, `401 unauthorized`, `403 insufficient_scope`, `500 internal_error` (invalid service token configuration), and `503 storage_unavailable`.
 
@@ -441,6 +441,6 @@ The URL is a bearer capability. The Worker never logs the complete URL and does 
 
 ## Retention and maintenance
 
-R2 object deletion is provided only by the separately provisioned 14-day bucket lifecycle rule. The Worker exports no scheduled handler, performs no R2 reconciliation, and automatically deletes no D1 rows. Ghost and Bundle collection time windows restrict API visibility without deleting older D1 data. D1 pruning is an explicit operator action outside the Worker.
+R2 object deletion is provided only by the separately provisioned 8-day bucket lifecycle rule. The Worker exports no scheduled handler, performs no R2 reconciliation, and automatically deletes no D1 rows. Ghost and Bundle collection time windows restrict API visibility without deleting older D1 data. D1 pruning is an explicit operator action outside the Worker.
 
 A matching retry of `POST /bundles` validates and commits an R2-only object left by a prior D1 failure. Pending BazaarDB deliveries older than R2 retention and expired third leases converge when the next claim request runs.

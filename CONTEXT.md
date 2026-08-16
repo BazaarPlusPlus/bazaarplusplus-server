@@ -20,7 +20,7 @@ The Worker exposes liveness, Bundle ingest, stateless Bundle collection, Ghost d
 
 Bundle ingest buffers only the fixed prefix and bounded manifest. Run and Screenshot bytes remain compressed/encoded and flow through incremental digest validation into one conditional R2 PUT. The D1 Bundle row, eligible Ghost projections, optional BazaarDB delivery, and uploader record commit in one batch.
 
-All consumers download the same complete Bundle directly from a seven-day R2 presigned `GET` URL. The Worker has no download proxy. R2 retention is 14 days. Ghost queries expose only the most recent five days, Bundle collection accepts only the 14-day R2 window, and older D1 rows remain until manual maintenance.
+All consumers download the same complete Bundle directly from a seven-day R2 presigned `GET` URL. The Worker has no download proxy. R2 retention is 8 days. Ghost queries expose only the most recent five days, Bundle collection accepts only the 8-day R2 window, and older D1 rows remain until manual maintenance.
 
 `bundle_uploaders` is monotonic for the V5 deployment. It records successful uploader assertions, not authenticated identities. A projection is eligible only for self or an opponent already present before that Bundle's final uploader insert; rejected history is never backfilled.
 

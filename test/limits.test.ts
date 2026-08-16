@@ -7,6 +7,7 @@ import {
   DELIVERY_RETRY_BACKOFF_MS,
   MAX_BATTLES_PER_BUNDLE,
   MAX_DELIVERY_ATTEMPTS,
+  R2_RETENTION_MS,
 } from "../src/limits";
 
 function compact(sql: string): string {
@@ -24,6 +25,10 @@ function expectDeliveryLimits(sql: string): void {
 
 test("a V5 Bundle accepts at most 30 Battle projections", () => {
   expect(MAX_BATTLES_PER_BUNDLE).toBe(30);
+});
+
+test("R2 retention is eight days", () => {
+  expect(R2_RETENTION_MS).toBe(8 * 86_400_000);
 });
 
 test("delivery constants stay aligned with the migration and live schema", async () => {
