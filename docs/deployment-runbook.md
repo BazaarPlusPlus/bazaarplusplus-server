@@ -26,11 +26,11 @@ Create an R2 S3 API credential scoped to `bazaarplusplus-bundle-v5` with Object 
 Set the bucket lifecycle:
 
 ```sh
-npx wrangler r2 bucket lifecycle add bazaarplusplus-bundle-v5 v5-bundle-retention bundles/ --expire-days 14
+npx wrangler r2 bucket lifecycle add bazaarplusplus-bundle-v5 v5-bundle-retention bundles/ --expire-days 8
 npx wrangler r2 bucket lifecycle list bazaarplusplus-bundle-v5
 ```
 
-The listing must show the `bundles/` prefix expiring after 14 days.
+The listing must show the `bundles/` prefix expiring after 8 days.
 
 ## 3. Configure rate limiting and secrets
 

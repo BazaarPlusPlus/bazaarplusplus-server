@@ -14,7 +14,7 @@ Bundle upload is intentionally unauthenticated: `uploader_account_id` and `bundl
 
 ## Runtime boundaries
 
-The Worker never exposes a Bundle download proxy and never decompresses the Run payload during ingest. Protected routes authenticate before parsing or querying, and `GET /ghost-battles` calls its rate-limit binding before business query parsing or D1 access. R2 object retention is an externally provisioned 14-day lifecycle rule, and every issued presigned URL is a seven-day S3 `GetObject` capability.
+The Worker never exposes a Bundle download proxy and never decompresses the Run payload during ingest. Protected routes authenticate before parsing or querying, and `GET /ghost-battles` calls its rate-limit binding before business query parsing or D1 access. R2 object retention is an externally provisioned 8-day lifecycle rule, and every issued presigned URL is a seven-day S3 `GetObject` capability.
 
 ## Change discipline
 

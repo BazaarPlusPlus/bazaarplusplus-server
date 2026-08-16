@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../../src/index";
-import { CLAIM_LEASE_MS, DELIVERY_RETRY_BACKOFF_MS } from "../../src/limits";
+import { CLAIM_LEASE_MS, DELIVERY_RETRY_BACKOFF_MS, R2_RETENTION_MS } from "../../src/limits";
 import { claimDeliveries, settleDeliveries } from "../../src/modules/bazaardb-delivery";
 import { makeBundleFixture, uploadRequest } from "../fixtures/bundle";
 import { FakeClock } from "../fixtures/clock";
@@ -284,7 +284,7 @@ describe("BazaarDB delivery claim and settle", () => {
   test("claim lazily fails a pending Bundle whose R2 retention elapsed", async () => {
     const bundleId = await uploadScreenshotBundle(10);
     await env.DB.prepare(`UPDATE bundles SET stored_at_ms = ?1 WHERE bundle_id = ?2`)
-      .bind(Date.now() - 14 * 86_400_000 - 1, bundleId)
+      .bind(Date.now() - R2_RETENTION_MS - 1, bundleId)
       .run();
 
     expect(await claim()).toEqual({ claim_id: null, expires_at_ms: null, items: [] });

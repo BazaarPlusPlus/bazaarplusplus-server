@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 
 import worker from "../../src/index";
+import { R2_RETENTION_MS } from "../../src/limits";
 import { collectBundles } from "../../src/modules/bundle-collection";
 import { FakeClock } from "../fixtures/clock";
 import { createTestDeps } from "../fixtures/deps";
@@ -134,7 +135,7 @@ describe("GET /bundles", () => {
 
   test("rejects an expired retention window", async () => {
     const response = await worker.fetch(
-      collectionRequest(`available_from_ms=${Date.now() - 1_209_600_001}`),
+      collectionRequest(`available_from_ms=${Date.now() - R2_RETENTION_MS - 1}`),
       env,
     );
     expect(response.status).toBe(410);

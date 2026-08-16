@@ -396,7 +396,7 @@ The complete manifest JSON Schema is inlined in the appendix at the end of this 
 
 - Screenshot delivery is strictly **opt-in**: the mod includes the end-of-run Screenshot in the uploaded Bundle only while the player has BazaarDB upload enabled, and only Screenshot-bearing Bundles are delivered to BazaarDB.
 - A delivery exposes exactly the Bundle contents described above — the player identity as shown in game, the structured run record, and the end-of-run image. Nothing else is collected for this integration.
-- Bundles are retained on the BazaarPlusPlus side for **14 days** from upload, after which they are removed by a storage lifecycle rule. Settling a delivery does not delete the Bundle. A delivery still pending when its Bundle passes retention is marked failed with `failure_reason: "bundle_expired"` and is never handed out; under the recommended pull cadence this only occurs after a multi-day outage on the BazaarDB side.
+- Bundles are retained on the BazaarPlusPlus side for **8 days** from upload, after which they are removed by a storage lifecycle rule. Settling a delivery does not delete the Bundle. A delivery still pending when its Bundle passes retention is marked failed with `failure_reason: "bundle_expired"` and is never handed out; under the recommended pull cadence this only occurs after a multi-day outage on the BazaarDB side.
 
 ## Changes from the V4 Integration
 
@@ -408,7 +408,7 @@ For teams migrating a V4 pull job:
 - **Concurrency**: the one-outstanding-batch rule and its `409` recovery flow are gone; claims may overlap, and a lost claim response is recovered by lease expiry instead of a `409` re-fetch.
 - **Settlement**: `confirm` (success-only) becomes per-item `settle` with three outcomes. `permanent_failure` is new: it terminates a bad delivery immediately instead of burning all three attempts. Retryable failures now re-queue with explicit backoff (60 s, then 5 min) rather than waiting for full lease expiry.
 - **Lease vs. URL lifetime**: download URLs are valid for 7 days instead of lease-scoped, but the settle deadline is still the 10-minute lease.
-- **Retention**: delivery no longer deletes the stored object on confirmation; a fixed 14-day retention governs all Bundles. The `object_gone` failure reason is replaced by `bundle_expired`.
+- **Retention**: delivery no longer deletes the stored object on confirmation; a fixed 8-day retention governs all Bundles. The `object_gone` failure reason is replaced by `bundle_expired`.
 - **Errors**: all errors use a structured envelope with `code`, `retryable`, and `request_id`; wrong-scope tokens return `403 insufficient_scope` instead of `401`. Unchanged: the 10-minute lease, the 3-attempt cap with attempts counted at claim time, and at-least-once delivery semantics.
 
 ## Appendix: Manifest JSON Schema
