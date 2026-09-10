@@ -21,6 +21,12 @@ export async function signDownloadPage(
 ): Promise<SignedBundleDownload[]> {
   const signedByKey = new Map<string, Promise<SignedBundleDownload>>();
   try {
+    // Complete one real signature before fan-out so aws4fetch's date-scoped
+    // signing-key cache is populated instead of derived once per distinct key.
+    const firstKey = objectKeys[0];
+    if (firstKey !== undefined) {
+      signedByKey.set(firstKey, Promise.resolve(await signer.sign(firstKey, issuedAtMs)));
+    }
     return await Promise.all(
       objectKeys.map((objectKey) => {
         let signed = signedByKey.get(objectKey);

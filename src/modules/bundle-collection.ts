@@ -113,25 +113,21 @@ export async function collectBundles(
 
   let rows: CollectionRow[];
   try {
+    const lowerBound =
+      afterTime === null ? "available_at_ms >= ?1" : "(available_at_ms, bundle_id) > (?1, ?4)";
     const result = await env.DB.prepare(
       `SELECT bundle_id, available_at_ms, object_key
        FROM bundles INDEXED BY idx_bundles_available
-       WHERE available_at_ms >= ?1
-         AND available_at_ms < ?2
-         AND (
-           ?3 IS NULL
-           OR available_at_ms > ?3
-           OR (available_at_ms = ?3 AND bundle_id > ?4)
-         )
+       WHERE ${lowerBound} AND available_at_ms < ?2
        ORDER BY available_at_ms ASC, bundle_id ASC
-       LIMIT ?5`,
-    )
-      // ?1 seeks the index at the keyset position when present (validation above
-      // guarantees afterTime >= from), so a page reads O(limit) index entries
-      // instead of rescanning the window from its start on every page.
-      .bind(afterTime ?? from, before, afterTime, afterId, limit + 1)
-      .all<CollectionRow>();
-    rows = result.results;
+       LIMIT ?3`,
+    );
+    const page =
+      afterTime === null
+        ? result.bind(from, before, limit + 1)
+        : result.bind(afterTime, before, limit + 1, afterId);
+    const found = await page.all<CollectionRow>();
+    rows = found.results;
   } catch {
     throw new HttpError(503, "storage_unavailable", "Bundle index query failed", true);
   }

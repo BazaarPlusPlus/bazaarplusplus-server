@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createBundleDownloadSigner, signDownloadPage } from "../src/presigner";
 import { RecordingBundleDownloadSigner, RejectingBundleDownloadSigner } from "./fixtures/presigner";
@@ -65,4 +65,41 @@ describe("Bundle download presigner adapters", () => {
       retryable: true,
     });
   });
+});
+
+test("a cold download page derives one signing key and preserves signatures across UTC dates", async () => {
+  const signer = createBundleDownloadSigner(env);
+  const keys = Array.from(
+    { length: 50 },
+    (_, index) => `bundles/2026-08-02/01J${String(index).padStart(23, "0")}.bundle`,
+  );
+  for (const issuedAt of [1_785_715_199_000, 1_785_715_200_000]) {
+    const reference = createBundleDownloadSigner(env);
+    const expected = [];
+    for (const key of keys) expected.push(await reference.sign(key, issuedAt));
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    try {
+      const actual = await signDownloadPage(signer, keys, issuedAt, "failed");
+      expect(actual).toEqual(expected);
+      expect(sign).toHaveBeenCalledTimes(keys.length + 4);
+    } finally {
+      sign.mockRestore();
+    }
+  }
+});
+
+test("an empty download page performs no signing", async () => {
+  const signer = new RecordingBundleDownloadSigner();
+  expect(await signDownloadPage(signer, [], 1_000, "failed")).toEqual([]);
+  expect(signer.calls).toEqual([]);
+});
+
+test("a later signing failure retains the page error contract", async () => {
+  const signer = new RecordingBundleDownloadSigner();
+  const sign = vi.spyOn(signer, "sign");
+  sign.mockResolvedValueOnce({ url: "https://fake.invalid/first", expiresAtMs: 1_000 });
+  sign.mockRejectedValueOnce(new Error("later signature failed"));
+  await expect(
+    signDownloadPage(signer, ["first", "second"], 1_000, "page failed"),
+  ).rejects.toMatchObject({ status: 503, code: "storage_unavailable", message: "page failed" });
 });

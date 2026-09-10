@@ -36,7 +36,6 @@ interface IndexedSettleInput extends SettleInput {
 
 interface ReceiptRow {
   claim_id: string | null;
-  bundle_id: string | null;
   outcome: SettleOutcome | null;
   reason: string | null;
   delivery_state: "pending" | "done" | "failed" | null;
@@ -82,16 +81,12 @@ async function compensateClaim(env: Env, claimId: string, now: number): Promise<
 // "no query solution" for a partial index + INDEXED BY + bound predicate.
 // test/query-plans.test.ts mirrors these statements and must change in the same commit.
 //
-// Expiry convergence drives from the pending-delivery partial indexes and probes
-// each Bundle by primary key, so its reads scale with the pending backlog rather
-// than with the ever-growing Bundle history (D1 retention is manual). Every
-// reachable pending row is in exactly one of the two partial indexes: claim caps
-// delivery_attempts at MAX_DELIVERY_ATTEMPTS and always sets the lease, and
-// settle never leaves an exhausted row pending.
+// The migration maintains bundle_stored_at_ms from bundles in database triggers.
+// Its pending-only index lets expiry skip both live backlog and retained history.
 function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatement {
   return db
     .prepare(
-      `UPDATE bazaardb_deliveries
+      `UPDATE bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
        SET delivery_state = 'failed',
            active_claim_id = NULL,
            active_claim_order = NULL,
@@ -99,22 +94,7 @@ function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatemen
            failed_at_ms = ?1,
            failure_reason = 'bundle_expired'
        WHERE delivery_state = 'pending'
-         AND bundle_id IN (
-           SELECT d.bundle_id
-           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_claimable
-           JOIN bundles AS b ON b.bundle_id = d.bundle_id
-           WHERE d.delivery_state = 'pending'
-             AND d.delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
-             AND b.stored_at_ms < ?2
-           UNION ALL
-           SELECT d.bundle_id
-           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_exhausted_lease
-           JOIN bundles AS b ON b.bundle_id = d.bundle_id
-           WHERE d.delivery_state = 'pending'
-             AND d.delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
-             AND d.active_claim_id IS NOT NULL
-             AND b.stored_at_ms < ?2
-         )`,
+         AND bundle_stored_at_ms < ?2`,
     )
     .bind(now, now - R2_RETENTION_MS);
 }
@@ -175,8 +155,7 @@ function claimDeliveryPage(
        WHERE bundle_id IN (SELECT bundle_id FROM candidates)
          AND delivery_state = 'pending'
          AND delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
-         AND claimable_at_ms <= ?1
-       RETURNING bundle_id, delivery_attempts`,
+         AND claimable_at_ms <= ?1`,
     )
     .bind(now, claimId, expiresAt, limit);
 }
@@ -441,7 +420,6 @@ export async function settleDeliveries(
       env.DB.prepare(
         `SELECT
            a.claim_id,
-           a.bundle_id,
            a.outcome,
            a.reason,
            d.delivery_state,
@@ -457,7 +435,6 @@ export async function settleDeliveries(
       (result) =>
         (result.results?.[0] as ReceiptRow | undefined) ?? {
           claim_id: null,
-          bundle_id: null,
           outcome: null,
           reason: null,
           delivery_state: null,

@@ -17,10 +17,9 @@ describe("critical D1 query plans", () => {
     const detail = await plan(
       `SELECT bundle_id, available_at_ms, object_key
        FROM bundles INDEXED BY idx_bundles_available
-       WHERE available_at_ms >= ?1 AND available_at_ms < ?2
-         AND (?3 IS NULL OR available_at_ms > ?3 OR (available_at_ms = ?3 AND bundle_id > ?4))
-       ORDER BY available_at_ms ASC, bundle_id ASC LIMIT ?5`,
-      [1, 2, null, null, 201],
+       WHERE (available_at_ms, bundle_id) > (?1, ?4) AND available_at_ms < ?2
+       ORDER BY available_at_ms ASC, bundle_id ASC LIMIT ?3`,
+      [1, 2, 201, "bundle"],
     );
     expect(detail).toContain("idx_bundles_available");
     expect(detail).toContain("COVERING");
@@ -182,9 +181,9 @@ describe("critical D1 query plans", () => {
     expect(detail).toMatch(/PRIMARY KEY|sqlite_autoindex_bazaardb_deliveries_1/);
   });
 
-  test("claim-time R2 expiry drives from pending deliveries, not Bundle history", async () => {
+  test("claim-time R2 expiry seeks only the expired pending range", async () => {
     const converged = await plan(
-      `UPDATE bazaardb_deliveries
+      `UPDATE bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
        SET delivery_state = 'failed',
            active_claim_id = NULL,
            active_claim_order = NULL,
@@ -192,27 +191,58 @@ describe("critical D1 query plans", () => {
            failed_at_ms = ?1,
            failure_reason = 'bundle_expired'
        WHERE delivery_state = 'pending'
-         AND bundle_id IN (
-           SELECT d.bundle_id
-           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_claimable
-           JOIN bundles AS b ON b.bundle_id = d.bundle_id
-           WHERE d.delivery_state = 'pending'
-             AND d.delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
-             AND b.stored_at_ms < ?2
-           UNION ALL
-           SELECT d.bundle_id
-           FROM bazaardb_deliveries AS d INDEXED BY idx_bazaardb_exhausted_lease
-           JOIN bundles AS b ON b.bundle_id = d.bundle_id
-           WHERE d.delivery_state = 'pending'
-             AND d.delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
-             AND d.active_claim_id IS NOT NULL
-             AND b.stored_at_ms < ?2
-         )`,
+         AND bundle_stored_at_ms < ?2`,
       [1, 0],
     );
-    expect(converged).toContain("idx_bazaardb_claimable");
-    expect(converged).toContain("idx_bazaardb_exhausted_lease");
-    expect(converged).toMatch(/PRIMARY KEY|sqlite_autoindex_bundles_1/);
-    expect(converged).not.toContain("idx_bundles_stored_retention");
+    expect(converged).toContain(
+      "SEARCH bazaardb_deliveries USING INDEX idx_bazaardb_pending_retention",
+    );
+    expect(converged).toContain("bundle_stored_at_ms<?");
+    expect(converged).not.toContain("SCAN");
   });
+
+  test("Bundle deletion looks up Ghost children through their foreign-key index", async () => {
+    const detail = await plan("DELETE FROM bundles WHERE bundle_id = ?1", ["bundle"]);
+    expect(detail).toContain("idx_ghost_battles_bundle");
+    expect(detail).not.toContain("SCAN ghost_battles");
+  });
+});
+
+test("keyset reads and empty expiry work stay bounded with a large live backlog", async () => {
+  await env.DB.prepare(`
+    WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 1999)
+    INSERT INTO bundles (
+      bundle_id, run_id, uploader_account_id, object_key, bundle_sha256,
+      bundle_version, manifest_bytes, object_bytes, client_created_at_ms,
+      stored_at_ms, available_at_ms, run_format_version, run_bytes, run_sha256, has_screenshot
+    )
+    SELECT printf('%026d', n), 'plan-' || n, 'plan-backlog',
+           'bundles/2026-08-02/' || printf('%026d', n) || '.bundle',
+           printf('%064d', 0), 5, 10, 100, 100, 100, 100, 5, 10, printf('%064d', 0), 0
+    FROM seq
+  `).run();
+  await env.DB.prepare(`
+    INSERT INTO bazaardb_deliveries (bundle_id, claimable_at_ms, created_at_ms, state_updated_at_ms)
+    SELECT bundle_id, 200, 100, 100 FROM bundles WHERE uploader_account_id = 'plan-backlog'
+  `).run();
+  const page = await env.DB.prepare(`
+    SELECT bundle_id, available_at_ms, object_key
+    FROM bundles INDEXED BY idx_bundles_available
+    WHERE (available_at_ms, bundle_id) > (?1, ?4) AND available_at_ms < ?2
+    ORDER BY available_at_ms, bundle_id LIMIT ?3
+  `)
+    .bind(100, 101, 51, String(1948).padStart(26, "0"))
+    .all();
+  expect(page.results).toHaveLength(51);
+  expect(page.meta.rows_read).toBeLessThan(100);
+  const expiry = await env.DB.prepare(`
+    UPDATE bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
+    SET delivery_state = 'failed', active_claim_id = NULL, active_claim_order = NULL,
+        state_updated_at_ms = ?1, failed_at_ms = ?1, failure_reason = 'bundle_expired'
+    WHERE delivery_state = 'pending' AND bundle_stored_at_ms < ?2
+  `)
+    .bind(200, 0)
+    .run();
+  expect(expiry.meta.changes).toBe(0);
+  expect(expiry.meta.rows_read).toBeLessThan(10);
 });

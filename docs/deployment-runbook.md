@@ -60,6 +60,10 @@ npx wrangler d1 migrations apply bazaarplusplus-mod-api-v5-db --remote
 npx wrangler deploy
 ```
 
+Migration `0002_hot_path_indexes.sql` must complete before deploying the Worker that queries `idx_bazaardb_pending_retention`. It adds the pending retention projection and database-owned synchronization triggers, backfills only pending deliveries, and indexes Ghost Bundle foreign keys. Index creation reads existing tables; allow for this work when selecting the deployment window. It does not delete records or rewrite historical terminal deliveries.
+
+After migration, verify the two indexes and three triggers exist and that pending delivery `bundle_stored_at_ms` values match `bundles.stored_at_ms`. A Worker rollback may leave this additive migration in place: older code remains compatible. Do not reapply an already recorded migration.
+
 Verify the custom domain resolves only to `bazaarplusplus-mod-api-v5` and that the Worker has no cron trigger.
 
 ## 5. Production smoke test
