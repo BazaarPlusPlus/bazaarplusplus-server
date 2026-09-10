@@ -668,3 +668,47 @@ describe("readJsonObject invalid_json contract", () => {
     await expectErrorBody(response, "invalid_json", false);
   });
 });
+
+test("retention convergence preserves the exact boundary and precedes attempt exhaustion", async () => {
+  const expired = await uploadScreenshotBundle(70);
+  const boundary = await uploadScreenshotBundle(71);
+  const clock = new FakeClock(Date.now());
+  await env.DB.batch([
+    env.DB.prepare("UPDATE bundles SET stored_at_ms = ?1 WHERE bundle_id = ?2").bind(
+      clock.ms - R2_RETENTION_MS - 1,
+      expired,
+    ),
+    env.DB.prepare("UPDATE bundles SET stored_at_ms = ?1 WHERE bundle_id = ?2").bind(
+      clock.ms - R2_RETENTION_MS,
+      boundary,
+    ),
+    env.DB.prepare(`UPDATE bazaardb_deliveries
+      SET delivery_attempts = 3, active_claim_id = ?1, active_claim_order = 0, claimable_at_ms = ?2
+      WHERE bundle_id = ?3`).bind(VALID_CLAIM_ID, clock.ms - 1, expired),
+    env.DB.prepare("UPDATE bazaardb_deliveries SET claimable_at_ms = ?1 WHERE bundle_id = ?2").bind(
+      clock.ms + CLAIM_LEASE_MS,
+      boundary,
+    ),
+  ]);
+  const deps = createTestDeps({ now: clock.now });
+  const runClaim = () =>
+    claimDeliveries(deliveryRequest("claim", { limit: 1 }), env, "retention", deps);
+  expect(await runClaim()).toEqual({ claim_id: null, expires_at_ms: null, items: [] });
+  const state = (id: string) =>
+    env.DB.prepare(
+      "SELECT delivery_state, failure_reason FROM bazaardb_deliveries WHERE bundle_id = ?1",
+    )
+      .bind(id)
+      .first();
+  expect(await state(expired)).toEqual({
+    delivery_state: "failed",
+    failure_reason: "bundle_expired",
+  });
+  expect(await state(boundary)).toEqual({ delivery_state: "pending", failure_reason: null });
+  clock.ms += 1;
+  await runClaim();
+  expect(await state(boundary)).toEqual({
+    delivery_state: "failed",
+    failure_reason: "bundle_expired",
+  });
+});

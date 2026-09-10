@@ -31,6 +31,8 @@ The architecture therefore uses a small number of explicit seams rather than con
 
 Lazy delivery convergence is claim-only. `POST /bazaardb/deliveries/claim` marks Bundles beyond R2 retention and expired final attempts as failed before claiming a page. Settle does not perform convergence; it validates active lease ownership and applies idempotent per-attempt outcomes.
 
+Pending delivery retention uses the indexed `bundle_stored_at_ms` projection. Database triggers derive it from the authoritative `bundles.stored_at_ms` on delivery insertion, Bundle storage-time changes, and terminal-to-pending requeue. Historical terminal rows need no backfill because retention never queries them. This adds one indexed projection and an insert-time update to avoid scanning the live pending backlog on every claim. The migration is compatible with older Workers that omit the new column; deploy it before the Worker.
+
 ## Consequences
 
 - Public route additions must update the route table, contract tests, and API reference together.
