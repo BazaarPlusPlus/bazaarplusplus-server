@@ -24,7 +24,7 @@ describe("bundle commit", () => {
     });
     expect(
       await env.DB.prepare(
-        `SELECT bundle_id, opponent_account_id FROM ghost_battles
+        `SELECT bundle_id, opponent_account_id FROM ghost_battle_summaries
          WHERE uploader_account_id = 'commit-self-uploader'`,
       ).first(),
     ).toEqual({
@@ -46,7 +46,7 @@ describe("bundle commit", () => {
       projection: { eligible: 0, inserted: 0 },
     });
     expect(
-      await env.DB.prepare(`SELECT battle_id FROM ghost_battles WHERE bundle_id = ?1`)
+      await env.DB.prepare(`SELECT battle_id FROM ghost_battle_summaries WHERE bundle_id = ?1`)
         .bind(data.descriptor.bundleId)
         .first(),
     ).toBeNull();
@@ -71,7 +71,9 @@ describe("bundle commit", () => {
       projection: { eligible: 1, inserted: 1 },
     });
     expect(
-      await env.DB.prepare(`SELECT opponent_account_id FROM ghost_battles WHERE bundle_id = ?1`)
+      await env.DB.prepare(
+        `SELECT opponent_account_id FROM ghost_battle_summaries WHERE bundle_id = ?1`,
+      )
         .bind(data.descriptor.bundleId)
         .first(),
     ).toEqual({ opponent_account_id: opponent });
@@ -103,7 +105,7 @@ describe("bundle commit", () => {
     expect(events).toEqual([{ bundle_id: second.descriptor.bundleId, dropped: 1 }]);
     expect(
       await env.DB.prepare(
-        `SELECT bundle_id FROM ghost_battles
+        `SELECT bundle_id FROM ghost_battle_summaries
          WHERE uploader_account_id = ?1 AND battle_id = 'battle-001'`,
       )
         .bind(uploader)

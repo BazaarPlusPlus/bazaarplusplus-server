@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import { commitBundle } from "../src/modules/bundle-commit";
 import { bundleData } from "./fixtures/bundle";
 
-test("the initial migration creates only the V5 domain tables", async () => {
+test("the completed migrations leave only the V5 domain tables", async () => {
   const result = await env.DB.prepare(
     `
       SELECT name
@@ -22,7 +22,7 @@ test("the initial migration creates only the V5 domain tables", async () => {
     "bazaardb_delivery_attempts",
     "bundle_uploaders",
     "bundles",
-    "ghost_battles",
+    "ghost_battle_summaries",
   ]);
 });
 
@@ -41,10 +41,10 @@ describe("V5 relational constraints", () => {
     expect(foreignKeys?.foreign_keys).toBe(1);
     await expect(
       env.DB.prepare(
-        `INSERT INTO ghost_battles (
+        `INSERT INTO ghost_battle_summaries (
           uploader_account_id, battle_id, bundle_id, opponent_account_id,
-          recorded_at_ms, projection_json
-        ) VALUES ('a', 'b', 'missing', 'c', 1, '{}')`,
+          recorded_at_ms, day, hour, result, player_display_name
+        ) VALUES ('a', 'b', 'missing', 'c', 1, 1, 1, 'win', 'Uploader')`,
       ).run(),
     ).rejects.toThrow();
   });
@@ -108,10 +108,10 @@ describe("V5 relational constraints", () => {
           null,
         ),
         env.DB.prepare(
-          `INSERT INTO ghost_battles (
+          `INSERT INTO ghost_battle_summaries (
             uploader_account_id, battle_id, bundle_id, opponent_account_id,
-            recorded_at_ms, projection_json
-          ) VALUES ('schema-uploader', 'bad-json', ?1, 'schema-uploader', 1, 'not-json')`,
+            recorded_at_ms, day, hour, result, player_display_name
+          ) VALUES ('schema-uploader', 'missing-day', ?1, 'schema-uploader', 1, NULL, 1, 'win', 'Uploader')`,
         ).bind(bundleId),
         env.DB.prepare(
           `INSERT INTO bundle_uploaders (player_account_id, first_bundle_at_ms)

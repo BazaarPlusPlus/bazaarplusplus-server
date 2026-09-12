@@ -5,3 +5,6 @@ coverage/
 *.log
 .dev.vars
 .dev.vars.*
+
+scripts/ghost-projection/mod-compat/bin/
+scripts/ghost-projection/mod-compat/obj/

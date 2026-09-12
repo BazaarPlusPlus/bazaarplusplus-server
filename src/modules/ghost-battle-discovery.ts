@@ -9,11 +9,21 @@ import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
 interface GhostRow {
+  uploader_account_id: string;
   battle_id: string;
   bundle_id: string;
+  opponent_account_id: string;
   recorded_at_ms: number;
   is_final_battle: number;
-  projection_json: string;
+  day: number;
+  hour: number;
+  result: string;
+  winner_combatant_id: string | null;
+  player_display_name: string;
+  player_hero_name: string | null;
+  opponent_hero_name: string | null;
+  player_rank: string | null;
+  player_rating: number | null;
   object_key: string;
 }
 
@@ -89,9 +99,12 @@ export async function discoverGhostBattles(
          g.bundle_id,
          g.recorded_at_ms,
          g.is_final_battle,
-         g.projection_json,
+         g.uploader_account_id, g.opponent_account_id,
+         g.day, g.hour, g.result, g.winner_combatant_id,
+         g.player_display_name, g.player_hero_name, g.opponent_hero_name,
+         g.player_rank, g.player_rating,
          x.object_key
-       FROM ghost_battles AS g INDEXED BY idx_ghost_battles_query
+       FROM ghost_battle_summaries AS g INDEXED BY idx_ghost_summaries_query
        JOIN bundles AS x ON x.bundle_id = g.bundle_id
        WHERE g.opponent_account_id = ?1
          AND g.recorded_at_ms >= ?2
@@ -112,13 +125,26 @@ export async function discoverGhostBattles(
     "Ghost Battle URL signing failed",
   );
   const battles = rows.map((row, index) => {
-    const projection = JSON.parse(row.projection_json) as Record<string, unknown>;
     return {
-      ...projection,
       battle_id: row.battle_id,
       bundle_id: row.bundle_id,
       recorded_at_ms: row.recorded_at_ms,
       is_final_battle: row.is_final_battle === 1,
+      day: row.day,
+      hour: row.hour,
+      result: row.result,
+      winner_combatant_id: row.winner_combatant_id,
+      player: {
+        account_id: row.uploader_account_id,
+        display_name: row.player_display_name,
+        hero_name: row.player_hero_name,
+        rank: row.player_rank,
+        rating: row.player_rating,
+      },
+      opponent: {
+        account_id: row.opponent_account_id,
+        hero_name: row.opponent_hero_name,
+      },
       download_url: downloads[index].url,
       download_expires_at_ms: downloads[index].expiresAtMs,
     };

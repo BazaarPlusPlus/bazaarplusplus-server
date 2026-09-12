@@ -34,9 +34,9 @@ test("scheduled retention uses stored time, cascades children and preserves uplo
     ),
     env.DB.prepare(`INSERT INTO bundle_uploaders (player_account_id, first_bundle_at_ms)
       VALUES ('retained-uploader', ?1)`).bind(CUTOFF - 1),
-    env.DB.prepare(`INSERT INTO ghost_battles (
-      uploader_account_id, battle_id, bundle_id, opponent_account_id, recorded_at_ms, projection_json
-    ) SELECT 'retained-uploader', run_id, bundle_id, 'retained-uploader', stored_at_ms, '{}'
+    env.DB.prepare(`INSERT INTO ghost_battle_summaries (
+      uploader_account_id, battle_id, bundle_id, opponent_account_id, recorded_at_ms, day, hour, result, player_display_name
+    ) SELECT 'retained-uploader', run_id, bundle_id, 'retained-uploader', stored_at_ms, 1, 1, 'win', 'Uploader'
       FROM bundles`),
     env.DB.prepare(`INSERT INTO bazaardb_delivery_attempts (
       claim_id, bundle_id, attempt_number, claimed_at_ms, expires_at_ms
@@ -49,7 +49,7 @@ test("scheduled retention uses stored time, cascades children and preserves uplo
   } as Cloudflare.Env);
   for (const table of [
     "bundles",
-    "ghost_battles",
+    "ghost_battle_summaries",
     "bazaardb_deliveries",
     "bazaardb_delivery_attempts",
   ]) {
@@ -84,9 +84,9 @@ test("retention has bounded indexed batches and resumes the remaining backlog", 
     .all<{ detail: string }>();
   const detail = plan.results.map(({ detail }) => detail).join("\n");
   expect(detail).toContain("idx_bundles_stored_retention");
-  expect(detail).toContain("idx_ghost_battles_bundle");
+  expect(detail).toContain("idx_ghost_summaries_bundle");
   expect(detail).not.toContain("TEMP B-TREE");
-  expect(detail).not.toContain("SCAN ghost_battles");
+  expect(detail).not.toContain("SCAN ghost_battle_summaries");
   expect(await pruneExpiredBundles(env.DB, NOW)).toEqual({ deleted: 3, hasMore: false });
 });
 
