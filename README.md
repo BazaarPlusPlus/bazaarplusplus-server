@@ -4,7 +4,7 @@ Cloudflare Worker for the BazaarPlusPlus V5 Bundle pipeline. It receives complet
 
 A Bundle is the immutable unit of upload, storage, and delivery — exactly one Run plus at most one optional Screenshot. Three properties shape everything else:
 
-- **Request-driven only.** The Worker exports only `fetch`. There is no cron and no background job: delivery maintenance converges lazily on claim traffic, and D1 retention is an explicit operator action.
+- **Bounded maintenance.** Delivery maintenance converges in bounded batches on claim traffic. A scheduled handler runs every 15 minutes to prune Bundle metadata older than 15 days from D1, with at most 100 Bundles per transaction and 1,000 per invocation. Uploader assertions remain deployment-lifetime state.
 - **Streaming, not buffering.** Ingest buffers only the fixed prefix and the bounded manifest; Run and Screenshot bytes stream through incremental digest validation into a single conditional R2 PUT and are never decompressed.
 - **No download proxy.** Every consumer downloads the same complete Bundle directly from R2 through a seven-day presigned `GET` URL, inside an 8-day R2 lifecycle window.
 
@@ -18,6 +18,7 @@ The design is a small number of deep seams, recorded in [ADR 0001](docs/adr/0001
 - `src/http/deps.ts` is the single dependency channel. Every handler has the form `(request, env, requestId, deps)`, so tests replace the clock and the download signer through one object without touching Worker bindings.
 - `src/bundle/open.ts` owns Bundle opening: bounded prefix and manifest reads, manifest validation, and streaming digest validation, all behind one `openBundle` call.
 - `src/modules/bundle-commit.ts` owns immutable-identity decisions and the atomic D1 commit, while `src/modules/bundle-ingest.ts` owns R2 orchestration and orphan recovery.
+- `src/modules/d1-retention.ts` owns scheduled D1 pruning by server storage time; foreign keys cascade to Ghost projections, deliveries, and attempt receipts.
 
 `test/` mirrors the `src/` layout (`http/`, `bundle/`, `modules/`), with golden-vector contract tests under `test/contracts/` and migration, schema, and root-module tests at the top level.
 

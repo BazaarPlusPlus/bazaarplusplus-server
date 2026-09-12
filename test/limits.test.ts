@@ -4,6 +4,7 @@ import { expect, test } from "vitest";
 import migrationSql from "../migrations/0001_v5_initial.sql?raw";
 import {
   CLAIM_MAX_LIMIT,
+  D1_RETENTION_MS,
   DELIVERY_RETRY_BACKOFF_MS,
   MAX_BATTLES_PER_BUNDLE,
   MAX_DELIVERY_ATTEMPTS,
@@ -29,6 +30,11 @@ test("a V5 Bundle accepts at most 30 Battle projections", () => {
 
 test("R2 retention is eight days", () => {
   expect(R2_RETENTION_MS).toBe(8 * 86_400_000);
+});
+
+test("D1 retains Bundle metadata for fifteen days", () => {
+  expect(D1_RETENTION_MS).toBe(15 * 86_400_000);
+  expect(D1_RETENTION_MS).toBeGreaterThan(R2_RETENTION_MS);
 });
 
 test("delivery constants stay aligned with the migration and live schema", async () => {

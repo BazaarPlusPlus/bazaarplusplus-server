@@ -81,16 +81,14 @@ describe("executed D1 query plans", () => {
     expect(claim).not.toContain("TEMP B-TREE");
     const attempts = await plan(query(queries, /^INSERT INTO bazaardb_delivery_attempts /));
     expect(attempts).toContain("idx_bazaardb_active_claim_order");
-    const active = await plan(query(queries, /^SELECT .* FROM bazaardb_deliveries /));
+    const active = await plan(query(queries, /^SELECT b\.bundle_id/));
     expect(active).toContain("idx_bazaardb_active_claim_order");
     expect(active).not.toContain("TEMP B-TREE");
-    const exhausted = await plan(
-      query(queries, /^UPDATE .*failure_reason = 'delivery_attempts_exhausted'/),
-    );
+    const exhausted = await plan(query(queries, /^UPDATE .*ELSE 'delivery_attempts_exhausted'/));
     expect(exhausted).toContain("idx_bazaardb_exhausted_lease");
     const expired = await plan(query(queries, /^UPDATE .*failure_reason = 'bundle_expired'/));
     expect(expired).toContain(
-      "SEARCH bazaardb_deliveries USING INDEX idx_bazaardb_pending_retention",
+      "SEARCH bazaardb_deliveries USING COVERING INDEX idx_bazaardb_pending_retention",
     );
     expect(expired).toContain("bundle_stored_at_ms<?");
     expect(expired).not.toContain("SCAN");

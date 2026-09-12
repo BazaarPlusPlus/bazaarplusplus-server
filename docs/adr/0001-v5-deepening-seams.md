@@ -31,6 +31,8 @@ The architecture therefore uses a small number of explicit seams rather than con
 
 Lazy delivery convergence is claim-only. `POST /bazaardb/deliveries/claim` marks Bundles beyond R2 retention and expired final attempts as failed before claiming a page. Settle does not perform convergence; it validates active lease ownership and applies idempotent per-attempt outcomes.
 
+Each convergence statement updates at most 1,000 rows. If expired pending Bundles remain, a scalar index probe sets the claim candidate limit to zero, and the handler returns a retryable `503` after committing maintenance progress. This keeps both scans and writes bounded without issuing expired objects or reporting an empty successful page while live work is blocked behind cleanup. Candidate orders are applied through an `UPDATE ... FROM` join; settle reads all requested receipts in one query.
+
 Pending delivery retention uses the indexed `bundle_stored_at_ms` projection. Database triggers derive it from the authoritative `bundles.stored_at_ms` on delivery insertion, Bundle storage-time changes, and terminal-to-pending requeue. Historical terminal rows need no backfill because retention never queries them. This adds one indexed projection and an insert-time update to avoid scanning the live pending backlog on every claim. The migration is compatible with older Workers that omit the new column; deploy it before the Worker.
 
 ### D1 performance verification
@@ -43,6 +45,7 @@ Query-plan and bounded-read tests call the public handler interfaces against loc
 - Tests can replace time and signing through one dependency object without changing Worker bindings.
 - Bundle validation and D1 commit decisions can be tested through public module interfaces.
 - Delivery maintenance occurs on claim traffic or through explicit operator action, never through settle or a scheduled Worker handler.
+- The scheduled handler owns a separate 15-day D1 metadata retention policy, detailed in [ADR 0002](0002-d1-retention.md). It deletes parent Bundles in bounded batches and relies on foreign-key cascades, without accessing R2 or deleting uploader assertions.
 
 ## Source layout
 

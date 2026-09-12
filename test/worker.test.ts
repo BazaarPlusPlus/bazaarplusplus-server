@@ -3,10 +3,6 @@ import { describe, expect, test } from "vitest";
 
 import worker from "../src/index";
 
-test("the Worker exports no scheduled handler", () => {
-  expect("scheduled" in worker).toBe(false);
-});
-
 test("an unknown route returns the canonical not_found error", async () => {
   const response = await worker.fetch(
     new Request("https://mod-api-v5.bazaarplusplus.com/unknown"),

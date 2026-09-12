@@ -64,7 +64,7 @@ Migration `0002_hot_path_indexes.sql` must complete before deploying the Worker 
 
 After migration, verify the two indexes and three triggers exist and that pending delivery `bundle_stored_at_ms` values match `bundles.stored_at_ms`. A Worker rollback may leave this additive migration in place: older code remains compatible. Do not reapply an already recorded migration.
 
-Verify the custom domain resolves only to `bazaarplusplus-mod-api-v5` and that the Worker has no cron trigger.
+Verify the custom domain resolves only to `bazaarplusplus-mod-api-v5` and that the Worker has the `*/15 * * * *` Cron Trigger from `wrangler.toml`. The trigger runs D1 retention only. Allow up to 15 minutes for trigger configuration to propagate.
 
 ## 5. Production smoke test
 
@@ -101,16 +101,20 @@ notification destination). Suggested starting thresholds; tune against real traf
 | Ingest identity conflicts | invocation logs: request path `/bundles`, method POST, response status 409 | > 10 in 15 min |
 | Ghost 429 rate | `event = "ghost.discovery" AND limited = true` | > 100 in 5 min |
 | Ingest orphan objects | `event = "bundle.ingest.orphan" OR event = "bundle.orphan.invalid"` | ≥ 1 in 15 min |
+| D1 cleanup failure | `event = "d1.retention.failed"` | ≥ 1 in 15 min |
+| D1 cleanup backlog | `event = "d1.retention" AND has_more = true` | Four consecutive runs |
+| D1 cleanup stopped | No successful `d1.retention` event / failed Cron invocations | No success for 45 min |
+| Delivery expiry catching up | `event = "bazaardb.maintenance" AND has_more = true` | Persistent for 15 min |
 
 Classified 4xx responses are intentionally not logged; they are client errors and
 would drown the signal.
 
 ### 6.2 D1 state checks (external prober)
 
-Aged pending deliveries, exhausted attempts, database size, and the age of manually
-retained rows are D1 state, not log events, and the Worker deliberately has no cron.
-Run these from an external scheduler (CI cron or an operator shell) with a Cloudflare
-API token scoped to D1 read:
+Aged pending deliveries and exhausted attempts can be inspected with the following
+read-only probes from an operator shell or external monitoring service. The retention
+Cron reports deletion progress and remaining backlog through `d1.retention` logs.
+Use a Cloudflare API token scoped to D1 read for these probes:
 
 ```sh
 npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT COUNT(*) AS aged_pending FROM bazaardb_deliveries WHERE delivery_state = 'pending' AND created_at_ms < (unixepoch() - 86400) * 1000"
@@ -121,18 +125,56 @@ npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "
 ```
 
 ```sh
-npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT COUNT(*) AS total_bundles, MIN(stored_at_ms) AS oldest_stored_at_ms FROM bundles"
+npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT stored_at_ms AS oldest_stored_at_ms FROM bundles INDEXED BY idx_bundles_stored_retention ORDER BY stored_at_ms, bundle_id LIMIT 1"
 ```
 
 Alert when `aged_pending` is nonzero for more than a day (BazaarDB has stopped
 claiming or keeps failing), when `exhausted` jumps, or when `oldest_stored_at_ms`
-ages past the agreed manual-retention horizon.
+remains older than 15 days plus one hour. Monitor D1 database size in Cloudflare D1
+Metrics and alert at 80% of the database's configured storage limit. Retention limits
+the history window; it does not cap the volume uploaded within those 15 days or the
+deployment-lifetime `bundle_uploaders` table.
 
 ### 6.3 Ecosystem gates
 
 - Verify the analyzer and BazaarDB clients compare the decoded Run identity/version with the Bundle manifest and quarantine mismatches.
 - Do not release the V5 mod until analyzer and BazaarDB consumers have completed the direct-R2 smoke test.
 
-## 7. Manual D1 maintenance boundary
+## 7. D1 retention
 
-The Worker has no automatic D1 TTL. Operators choose retention cutoffs, inspect the candidate row counts, and run separately authorized D1 cleanup outside deployment. Deleting a `bundles` row cascades to its Ghost projections, BazaarDB delivery, and attempt receipts; `bundle_uploaders` is deployment-lifetime state and is not part of routine cleanup.
+The Worker automatically prunes Bundle metadata after 15 days measured from
+`bundles.stored_at_ms`, the server-observed R2 storage time. It uses the scheduled
+invocation time as a fixed cutoff and deletes only rows strictly older than that
+cutoff. Client creation times and delivery settlement do not change the clock.
+
+Each invocation commits up to ten independent transactions of at most 100 parent
+Bundles each, oldest first. A Bundle delete cascades to its Ghost projections,
+BazaarDB delivery, and attempt receipts. `bundle_uploaders` is deployment-lifetime
+trust state and is never deleted. The handler requires only D1, without R2 credentials
+or service tokens, and makes no R2 calls. The R2 bucket keeps its separate 8-day rule.
+
+Before deploying this policy, inspect the oldest records with the probe above and
+preview the first eligible page:
+
+```sh
+npx wrangler d1 execute bazaarplusplus-mod-api-v5-db --remote --json --command "SELECT bundle_id, stored_at_ms FROM bundles INDEXED BY idx_bundles_stored_retention WHERE stored_at_ms < (unixepoch() - 15 * 86400) * 1000 ORDER BY stored_at_ms, bundle_id LIMIT 100"
+```
+
+Deploying the Worker enables pruning, including eligible historical records. No new
+migration is required beyond `0002_hot_path_indexes.sql`; its child index is required
+to keep cascades bounded. Validate the exact cutoff, cascades, interruption recovery,
+and query plans with `npm test`. A local scheduled invocation can also be exercised
+with Wrangler's `/cdn-cgi/local/scheduled` endpoint; it is not a public application route.
+
+A successful run logs `deleted_bundles` (parent count) and `has_more`. The configured
+budget supports up to 96,000 parent deletions per day when every trigger succeeds;
+large initial backlogs can take multiple runs. An error fails the scheduled invocation
+and emits `d1.retention.failed`; earlier committed batches remain deleted and the next
+invocation continues from the remaining rows. Retries and overlapping invocations
+are safe because each bounded selection and delete is one SQL statement.
+
+Use the backlog, missing-run, and storage alerts above to detect capacity pressure.
+Increase the schedule frequency or per-invocation batch count only after measuring
+delete duration and API latency. Keep each delete transaction small. To pause pruning,
+deploy `crons = []` in the managed Wrangler configuration; already deleted metadata
+requires recovery from an available D1 backup rather than a Worker rollback.
