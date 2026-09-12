@@ -6,12 +6,16 @@ import { bundleData } from "./fixtures/bundle";
 
 test("the hot-path migration backfills legacy deliveries and maintains Bundle storage ownership", async () => {
   // Restore the deployed initial schema to exercise the actual upgrade with data.
+  const initial = env.TEST_MIGRATIONS[0];
+  const legacyGhost = initial.queries.filter((sql) =>
+    /CREATE (TABLE ghost_battles|INDEX idx_ghost_battles_query)/.test(sql),
+  );
+  await env.DB.batch(legacyGhost.map((sql) => env.DB.prepare(sql)));
   await env.DB.batch([
     env.DB.prepare("DROP TRIGGER bazaardb_delivery_storage_insert"),
     env.DB.prepare("DROP TRIGGER bundle_storage_update"),
     env.DB.prepare("DROP TRIGGER bazaardb_delivery_storage_requeue"),
     env.DB.prepare("DROP INDEX idx_bazaardb_pending_retention"),
-    env.DB.prepare("DROP INDEX idx_ghost_battles_bundle"),
     env.DB.prepare("ALTER TABLE bazaardb_deliveries DROP COLUMN bundle_stored_at_ms"),
   ]);
   const fixture = await bundleData({

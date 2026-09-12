@@ -149,9 +149,10 @@ function buildStatements(
       read: "inserted",
       statement: db
         .prepare(
-          `INSERT INTO ghost_battles (
+          `INSERT INTO ghost_battle_summaries (
             uploader_account_id, battle_id, bundle_id, opponent_account_id,
-            recorded_at_ms, is_final_battle, projection_json
+            recorded_at_ms, is_final_battle, day, hour, result, winner_combatant_id,
+            player_display_name, player_hero_name, opponent_hero_name, player_rank, player_rating
           )
           SELECT ?2,
                  json_extract(value, '$.battle_id'),
@@ -159,10 +160,19 @@ function buildStatements(
                  json_extract(value, '$.opponent.account_id'),
                  json_extract(value, '$.recorded_at_ms'),
                  CASE json_extract(value, '$.is_final_battle') WHEN 1 THEN 1 ELSE 0 END,
-                 value
+                 json_extract(value, '$.day'),
+                 json_extract(value, '$.hour'),
+                 json_extract(value, '$.result'),
+                 json_extract(value, '$.winner_combatant_id'),
+                 json_extract(value, '$.player.display_name'),
+                 json_extract(value, '$.player.hero_name'),
+                 json_extract(value, '$.opponent.hero_name'),
+                 json_extract(value, '$.player.rank'),
+                 json_extract(value, '$.player.rating')
           FROM json_each(?1)
           WHERE ${ELIGIBILITY_PREDICATE}
-          ON CONFLICT(uploader_account_id, battle_id) DO NOTHING`,
+          ON CONFLICT(uploader_account_id, battle_id) DO NOTHING
+          RETURNING battle_id`,
         )
         .bind(battles, descriptor.uploaderAccountId, descriptor.bundleId),
     },
@@ -215,7 +225,8 @@ function readProjection(
     if (definition.read === "eligible") {
       eligible = Number((result?.results?.[0] as { eligible?: number } | undefined)?.eligible ?? 0);
     } else if (definition.read === "inserted") {
-      inserted = Number(result?.meta.changes ?? 0);
+      // Transitional compatibility triggers also write rows; count only our inserts.
+      inserted = result?.results.length ?? 0;
     }
   }
   return { eligible, inserted };

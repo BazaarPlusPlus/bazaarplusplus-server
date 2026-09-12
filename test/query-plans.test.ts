@@ -67,8 +67,8 @@ describe("executed D1 query plans", () => {
       "plan-ghost",
       deps(),
     );
-    const detail = await plan(query(queries, /^SELECT .* FROM ghost_battles /));
-    expect(detail).toContain("idx_ghost_battles_query");
+    const detail = await plan(query(queries, /^SELECT .* FROM ghost_battle_summaries /));
+    expect(detail).toContain("idx_ghost_summaries_query");
     expect(detail).toMatch(/PRIMARY KEY|sqlite_autoindex_bundles_1/);
     expect(detail).not.toContain("TEMP B-TREE");
   });
@@ -131,8 +131,8 @@ describe("schema query plans", () => {
       sql: "DELETE FROM bundles WHERE bundle_id = ?1",
       bindings: [BUNDLE_ID],
     });
-    expect(detail).toContain("idx_ghost_battles_bundle");
-    expect(detail).not.toContain("SCAN ghost_battles");
+    expect(detail).toContain("idx_ghost_summaries_bundle");
+    expect(detail).not.toContain("SCAN ghost_battle_summaries");
   });
 });
 

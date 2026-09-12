@@ -12,6 +12,8 @@ The public surface is six routes: liveness, public streaming ingest, token-prote
 
 ## Architecture
 
+Ghost discovery stores fifteen ordinary summary columns while preserving the Mod’s nested response objects and the complete Bundle/Run upload contract. Existing deployments require the staged [Ghost summary migration](docs/ghost-summary-migration.md) before deploying this Worker.
+
 The design is a small number of deep seams, recorded in [ADR 0001](docs/adr/0001-v5-deepening-seams.md):
 
 - `src/http/routes.ts` is the complete public route table, and `src/http/route-shell.ts` is the sole HTTP exit — it owns path and method resolution, authentication ordering, CORS, JSON envelopes, and request IDs. Handlers return status and body data, never a `Response`.

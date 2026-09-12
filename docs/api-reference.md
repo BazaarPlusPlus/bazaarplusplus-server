@@ -293,33 +293,19 @@ Response `200`:
       "recorded_at_ms": 1785628700000,
       "day": 10,
       "hour": 18,
-      "encounter_id": null,
-      "combat_kind": "pvp",
       "result": "win",
       "winner_combatant_id": "combatant-a",
-      "loser_combatant_id": "combatant-b",
       "is_final_battle": true,
       "player": {
         "account_id": "uploader-account",
         "display_name": "Player",
-        "hero_id": null,
         "hero_name": "Vanessa",
         "rank": "Gold",
-        "rating": 1234,
-        "level": 10,
-        "prestige": 2,
-        "victories": 9
+        "rating": 1234
       },
       "opponent": {
         "account_id": "account-id",
-        "display_name": "Opponent",
-        "hero_id": null,
-        "hero_name": "Pygmalien",
-        "rank": "Gold",
-        "rating": 1200,
-        "level": 10,
-        "prestige": 3,
-        "victories": 8
+        "hero_name": "Pygmalien"
       },
       "download_url": "https://bazaarplusplus-bundle-v5.<ACCOUNT_ID>.r2.cloudflarestorage.com/bundles/...bundle?X-Amz-Expires=604800&...",
       "download_expires_at_ms": 1786233800000
@@ -328,11 +314,13 @@ Response `200`:
 }
 ```
 
-Rows sort by `recorded_at_ms DESC, battle_id DESC`. The server-owned identity/time/final fields override projection JSON.
+Rows sort by `recorded_at_ms DESC, battle_id DESC`. The response is reconstructed from fifteen ordinary summary columns. `player` is the uploader/challenger and `opponent` is the queried local player; both remain nested objects. `day`, `hour`, and both account IDs are required by Mod import. `winner_combatant_id` remains available for result filtering, and `player.rank` / `player.rating` preserve Mod 5.1/5.2 display behavior. Nullable fields are emitted as JSON null.
 
 At ingest, a projection is inserted only when its opponent is the uploader or the opponent already exists in `bundle_uploaders`. The uploader is added only as the final write of a successful Bundle D1 batch. Filtered history is never backfilled. Cross-Bundle duplicate `(uploader_account_id, battle_id)` rows keep the first projection.
 
 Route errors: `400 invalid_query`, `429 rate_limited`, and `503 storage_unavailable`. An unknown account returns `200 {"battles":[]}`.
+
+The discovery summary omits both sides’ `hero_id`, `level`, `prestige`, and `victories`; `opponent.display_name`, `opponent.rank`, and `opponent.rating`; and `encounter_id`, `combat_kind`, and `loser_combatant_id`. The upload manifest contract and complete R2 Bundle/Run remain unchanged. Download capabilities are signed at query time using the parent Bundle object key. Mod 5.1.0, 5.2.0, and the audited 5.3.0 source accept this summary without a coordinated Mod release.
 
 ## `POST /bazaardb/deliveries/claim`
 

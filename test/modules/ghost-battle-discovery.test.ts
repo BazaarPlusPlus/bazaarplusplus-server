@@ -32,10 +32,10 @@ describe("GET /ghost-battles", () => {
     await env.DB.batch(
       [1, 2].map((index) =>
         env.DB.prepare(
-          `INSERT INTO ghost_battles (
+          `INSERT INTO ghost_battle_summaries (
             uploader_account_id, battle_id, bundle_id, opponent_account_id,
-            recorded_at_ms, is_final_battle, projection_json
-          ) VALUES ('ghost-injected-uploader', ?1, ?2, ?3, ?4, 0, '{"day":1}')`,
+            recorded_at_ms, is_final_battle, day, hour, result, player_display_name
+          ) VALUES ('ghost-injected-uploader', ?1, ?2, ?3, ?4, 0, 1, 1, 'win', 'Uploader')`,
         ).bind(`ghost-injected-${index}`, bundleId, account, clock.ms - index),
       ),
     );
@@ -230,49 +230,18 @@ describe("GET /ghost-battles", () => {
     )
       .bind(bundleId, `bundles/2026-08-02/${bundleId}.bundle`, "c".repeat(64), now)
       .run();
-    const projection = JSON.stringify({
-      day: 1,
-      hour: 1,
-      encounter_id: null,
-      combat_kind: "pvp",
-      result: "win",
-      winner_combatant_id: null,
-      loser_combatant_id: null,
-      player: {
-        account_id: "ghost-cap-uploader",
-        display_name: "Uploader",
-        hero_id: null,
-        hero_name: null,
-        rank: null,
-        rating: null,
-        level: null,
-        prestige: null,
-        victories: null,
-      },
-      opponent: {
-        account_id: account,
-        display_name: "Opponent",
-        hero_id: null,
-        hero_name: null,
-        rank: null,
-        rating: null,
-        level: null,
-        prestige: null,
-        victories: null,
-      },
-    });
     const statements = Array.from({ length: 202 }, (_, index) =>
       env.DB.prepare(
-        `INSERT INTO ghost_battles (
+        `INSERT INTO ghost_battle_summaries (
           uploader_account_id, battle_id, bundle_id, opponent_account_id,
-          recorded_at_ms, is_final_battle, projection_json
-        ) VALUES ('ghost-cap-uploader', ?1, ?2, ?3, ?4, 0, ?5)`,
+          recorded_at_ms, is_final_battle, day, hour, result, player_display_name
+        ) VALUES ('ghost-cap-uploader', ?1, ?2, ?3, ?4, 0, 1, 1, 'win', ?5)`,
       ).bind(
         `ghost-cap-${String(index).padStart(3, "0")}`,
         bundleId,
         account,
         index === 201 ? now - 6 * 86_400_000 : now - index,
-        projection,
+        "Uploader",
       ),
     );
     for (let offset = 0; offset < statements.length; offset += 50) {
@@ -416,10 +385,10 @@ describe("GET /ghost-battles", () => {
       .bind(bundleId, objectKey, "e".repeat(64), Date.now())
       .run();
     await env.DB.prepare(
-      `INSERT INTO ghost_battles (
+      `INSERT INTO ghost_battle_summaries (
         uploader_account_id, battle_id, bundle_id, opponent_account_id,
-        recorded_at_ms, is_final_battle, projection_json
-      ) VALUES ('ghost-signing-failure-uploader', 'ghost-signing-failure-battle', ?1, ?2, ?3, 0, '{"day":1}')`,
+        recorded_at_ms, is_final_battle, day, hour, result, player_display_name
+      ) VALUES ('ghost-signing-failure-uploader', 'ghost-signing-failure-battle', ?1, ?2, ?3, 0, 1, 1, 'win', 'Uploader')`,
     )
       .bind(bundleId, account, Date.now())
       .run();
