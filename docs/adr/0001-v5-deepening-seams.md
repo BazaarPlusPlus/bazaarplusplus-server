@@ -33,6 +33,10 @@ Lazy delivery convergence is claim-only. `POST /bazaardb/deliveries/claim` marks
 
 Pending delivery retention uses the indexed `bundle_stored_at_ms` projection. Database triggers derive it from the authoritative `bundles.stored_at_ms` on delivery insertion, Bundle storage-time changes, and terminal-to-pending requeue. Historical terminal rows need no backfill because retention never queries them. This adds one indexed projection and an insert-time update to avoid scanning the live pending backlog on every claim. The migration is compatible with older Workers that omit the new column; deploy it before the Worker.
 
+### D1 performance verification
+
+Query-plan and bounded-read tests call the public handler interfaces against local D1. A test recorder observes the actual SQL, bindings, and results at the existing D1 seam without replacing native statements or splitting batches. Plan assertions explain those recorded statements; read-cost assertions use their execution metadata. Production modules own the SQL, while tests own independent plan and cost expectations. Handwritten queries remain appropriate for migration and schema contracts that have no runtime caller.
+
 ## Consequences
 
 - Public route additions must update the route table, contract tests, and API reference together.

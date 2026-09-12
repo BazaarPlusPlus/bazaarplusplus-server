@@ -79,7 +79,6 @@ async function compensateClaim(env: Env, claimId: string, now: number): Promise<
 // The attempt predicates under INDEXED BY interpolate MAX_DELIVERY_ATTEMPTS as a
 // compile-time literal and must never become bound parameters: D1 answers
 // "no query solution" for a partial index + INDEXED BY + bound predicate.
-// test/query-plans.test.ts mirrors these statements and must change in the same commit.
 //
 // The migration maintains bundle_stored_at_ms from bundles in database triggers.
 // Its pending-only index lets expiry skip both live backlog and retained history.
