@@ -181,7 +181,7 @@ Content-Length: 1234567
 Content-Digest: sha-256=:<base64 SHA-256 of complete Bundle>:
 ```
 
-The digest field contains exactly one RFC 9530 `sha-256` value. The Worker buffers only the prefix and bounded manifest. It incrementally validates actual length, the complete digest, and both segment digests while streaming one conditional R2 PUT.
+The digest field contains exactly one RFC 9530 `sha-256` value. The Worker buffers only the prefix and bounded manifest. It rejects inconsistencies between manifest segment lengths and `Content-Length` before accessing storage. It incrementally validates actual length, the complete digest, and both segment digests while streaming one conditional R2 PUT. A manifest/header length conflict returns `422 invalid_bundle`; a body shorter or longer than an otherwise consistent declaration returns `400 invalid_content_length` (or `413 bundle_too_large` at the size limit).
 
 First logical commit returns `201`:
 
@@ -368,6 +368,8 @@ Response `200`:
 
 No work returns `{"claim_id":null,"expires_at_ms":null,"items":[]}`.
 
+Each claim first converges at most 1,000 expired Bundles and 1,000 expired final attempts. If expired pending Bundles remain, it returns `503 storage_unavailable` with `retryable: true` and `Retry-After: 1`. This response commits maintenance progress but grants no leases and counts no attempts. Retry with backoff, respecting `Retry-After`; an empty successful response still means there is no claimable work.
+
 The lease is ten minutes. An attempt is counted atomically when claimed, with a maximum of three. Multiple consumers cannot receive the same Bundle under overlapping valid leases. A response lost after claiming leaves the lease to expire naturally. URL-signing failure is compensated by removing this claim's receipts and restoring only rows still owned by this claim; a failed compensation remains recoverable by lease expiry.
 
 Route errors: `400 invalid_json`, `400 invalid_limit`, `401 unauthorized`, `403 insufficient_scope`, `500 internal_error` (invalid service token configuration), and `503 storage_unavailable`.
@@ -441,6 +443,8 @@ The URL is a bearer capability. The Worker never logs the complete URL and does 
 
 ## Retention and maintenance
 
-R2 object deletion is provided only by the separately provisioned 8-day bucket lifecycle rule. The Worker exports no scheduled handler, performs no R2 reconciliation, and automatically deletes no D1 rows. Ghost and Bundle collection time windows restrict API visibility without deleting older D1 data. D1 pruning is an explicit operator action outside the Worker.
+R2 object deletion is provided only by the separately provisioned 8-day bucket lifecycle rule. The scheduled handler runs every 15 minutes and deletes D1 Bundles whose `stored_at_ms` is strictly earlier than its scheduled time minus 15 days. Each delete commits at most 100 Bundles, with at most ten batches per invocation; backlog continues on later invocations. A Bundle at the exact 15-day boundary remains until a later run. Deletion cascades to Ghost projections, BazaarDB deliveries, and attempt receipts. `bundle_uploaders` remains deployment-lifetime state and is never pruned by this handler. The handler does not access R2.
+
+Client timestamps and settle activity do not extend D1 retention. Bundle identity deduplication and attempt idempotency end when their metadata is pruned; a later settle returns `unknown_item`. The five-day Ghost and eight-day Bundle collection windows remain unchanged. The 15-day cutoff is eligibility for asynchronous pruning, not a guarantee of deletion at an exact instant.
 
 A matching retry of `POST /bundles` validates and commits an R2-only object left by a prior D1 failure. Pending BazaarDB deliveries older than R2 retention and expired third leases converge when the next claim request runs.

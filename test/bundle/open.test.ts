@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import checksumsJson from "../../contracts/v5/fixtures/checksums.json?raw";
 import corruptMagicBase64 from "../../contracts/v5/fixtures/corrupt-magic.bundle.b64?raw";
@@ -15,6 +15,36 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("openBundle", () => {
+  test.each([
+    [1_048_576, "undeclared_trailing_bytes"],
+    [-1, "segment_out_of_bounds"],
+  ])(
+    "rejects a declared length difference of %i before reading payload bytes",
+    async (difference, reason) => {
+      const bytes = decodeBase64(runOnlyBase64);
+      const manifestEnd = 16 + new DataView(bytes.buffer).getUint32(12, false);
+      const pull = vi.fn(() => {
+        throw new Error("payload must not be read");
+      });
+      const cancel = vi.fn();
+      const source = new ReadableStream<Uint8Array>(
+        {
+          start(controller) {
+            controller.enqueue(bytes.subarray(0, manifestEnd));
+          },
+          pull,
+          cancel,
+        },
+        { highWaterMark: 0 },
+      );
+      await expect(openBundle(source, bytes.byteLength + difference, null)).rejects.toMatchObject({
+        status: 422,
+        details: { reason },
+      });
+      expect(pull).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
   test("rejects corrupt magic before exposing a body", async () => {
     const bytes = decodeBase64(corruptMagicBase64);
     await expect(openBundle(stream(bytes), bytes.byteLength, null)).rejects.toMatchObject({

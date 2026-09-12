@@ -16,11 +16,11 @@ This Worker receives completed game-run Bundles and makes them discoverable by t
 
 ## Runtime boundaries
 
-The Worker exposes liveness, Bundle ingest, stateless Bundle collection, Ghost discovery, and BazaarDB claim/settle. It exports only `fetch`, has no cron or scheduled handler, and performs no automatic D1 cleanup. Bundle upload retries recover matching R2-only objects, while claim requests lazily converge expired deliveries and exhausted attempts; settle only guards lease ownership. D1 retention is maintained manually by operators.
+The Worker exposes liveness, Bundle ingest, stateless Bundle collection, Ghost discovery, and BazaarDB claim/settle. A scheduled handler prunes D1 Bundle metadata older than 15 days every 15 minutes in bounded batches. Bundle upload retries recover matching R2-only objects, while claim requests lazily converge expired deliveries and exhausted attempts in bounded batches; settle only guards lease ownership. A claim returns a retryable response while expiry maintenance still has work, without granting leases.
 
 Bundle ingest buffers only the fixed prefix and bounded manifest. Run and Screenshot bytes remain compressed/encoded and flow through incremental digest validation into one conditional R2 PUT. The D1 Bundle row, eligible Ghost projections, optional BazaarDB delivery, and uploader record commit in one batch.
 
-All consumers download the same complete Bundle directly from a seven-day R2 presigned `GET` URL. The Worker has no download proxy. R2 retention is 8 days. Ghost queries expose only the most recent five days, Bundle collection accepts only the 8-day R2 window, and older D1 rows remain until manual maintenance.
+All consumers download the same complete Bundle directly from a seven-day R2 presigned `GET` URL. The Worker has no download proxy. R2 retention is 8 days. Ghost queries expose only the most recent five days, and Bundle collection accepts only the 8-day R2 window. D1 retention uses `bundles.stored_at_ms`; deleting a Bundle after 15 days cascades to its Ghost projections, delivery, and attempt receipts. Client timestamps and settlement do not extend retention. Bundle and attempt deduplication records exist only within this metadata retention window.
 
 `bundle_uploaders` is monotonic for the V5 deployment. It records successful uploader assertions, not authenticated identities. A projection is eligible only for self or an opponent already present before that Bundle's final uploader insert; rejected history is never backfilled.
 

@@ -7,6 +7,7 @@ import {
   CLAIM_DEFAULT_LIMIT,
   CLAIM_LEASE_MS,
   CLAIM_MAX_LIMIT,
+  DELIVERY_MAINTENANCE_BATCH_SIZE,
   DELIVERY_RETRY_BACKOFF_MS,
   MAX_DELIVERY_ATTEMPTS,
   R2_RETENTION_MS,
@@ -35,6 +36,7 @@ interface IndexedSettleInput extends SettleInput {
 }
 
 interface ReceiptRow {
+  bundle_id: string;
   claim_id: string | null;
   outcome: SettleOutcome | null;
   reason: string | null;
@@ -85,17 +87,22 @@ async function compensateClaim(env: Env, claimId: string, now: number): Promise<
 function convergeExpiredBundles(db: D1Database, now: number): D1PreparedStatement {
   return db
     .prepare(
-      `UPDATE bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
+      `UPDATE bazaardb_deliveries
        SET delivery_state = 'failed',
            active_claim_id = NULL,
            active_claim_order = NULL,
            state_updated_at_ms = ?1,
            failed_at_ms = ?1,
            failure_reason = 'bundle_expired'
-       WHERE delivery_state = 'pending'
-         AND bundle_stored_at_ms < ?2`,
+       WHERE bundle_id IN (
+         SELECT bundle_id
+         FROM bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
+         WHERE delivery_state = 'pending' AND bundle_stored_at_ms < ?2
+         ORDER BY bundle_stored_at_ms ASC, bundle_id ASC
+         LIMIT ?3
+       )`,
     )
-    .bind(now, now - R2_RETENTION_MS);
+    .bind(now, now - R2_RETENTION_MS, DELIVERY_MAINTENANCE_BATCH_SIZE);
 }
 
 function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedStatement {
@@ -107,7 +114,8 @@ function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedState
            active_claim_order = NULL,
            state_updated_at_ms = ?1,
            failed_at_ms = ?1,
-           failure_reason = 'delivery_attempts_exhausted'
+           failure_reason = CASE WHEN bundle_stored_at_ms < ?2
+             THEN 'bundle_expired' ELSE 'delivery_attempts_exhausted' END
        WHERE bundle_id IN (
          SELECT bundle_id
          FROM bazaardb_deliveries INDEXED BY idx_bazaardb_exhausted_lease
@@ -115,9 +123,20 @@ function convergeExhaustedAttempts(db: D1Database, now: number): D1PreparedState
            AND delivery_attempts = ${MAX_DELIVERY_ATTEMPTS}
            AND active_claim_id IS NOT NULL
            AND claimable_at_ms <= ?1
+         ORDER BY claimable_at_ms ASC, bundle_id ASC
+         LIMIT ?3
        )`,
     )
-    .bind(now);
+    .bind(now, now - R2_RETENTION_MS, DELIVERY_MAINTENANCE_BATCH_SIZE);
+}
+
+// A zero LIMIT skips the candidate scan until bounded expiry has caught up.
+// A WHERE filter would still walk the backlog even for an uncorrelated probe.
+function expiredPendingExists(cutoffParameter: "?1" | "?5"): string {
+  return `EXISTS (
+    SELECT 1 FROM bazaardb_deliveries INDEXED BY idx_bazaardb_pending_retention
+    WHERE delivery_state = 'pending' AND bundle_stored_at_ms < ${cutoffParameter}
+  )`;
 }
 
 function claimDeliveryPage(
@@ -140,23 +159,21 @@ function claimDeliveryPage(
            AND delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
            AND claimable_at_ms <= ?1
          ORDER BY claimable_at_ms ASC, created_at_ms ASC, bundle_id ASC
-         LIMIT ?4
+         LIMIT CASE WHEN ${expiredPendingExists("?5")} THEN 0 ELSE ?4 END
        )
-       UPDATE bazaardb_deliveries
+       UPDATE bazaardb_deliveries AS d
        SET active_claim_id = ?2,
-           active_claim_order = (
-             SELECT claim_order FROM candidates
-             WHERE candidates.bundle_id = bazaardb_deliveries.bundle_id
-           ),
+           active_claim_order = candidates.claim_order,
            claimable_at_ms = ?3,
            delivery_attempts = delivery_attempts + 1,
            state_updated_at_ms = ?1
-       WHERE bundle_id IN (SELECT bundle_id FROM candidates)
+       FROM candidates
+       WHERE d.bundle_id = candidates.bundle_id
          AND delivery_state = 'pending'
          AND delivery_attempts < ${MAX_DELIVERY_ATTEMPTS}
          AND claimable_at_ms <= ?1`,
     )
-    .bind(now, claimId, expiresAt, limit);
+    .bind(now, claimId, expiresAt, limit, now - R2_RETENTION_MS);
 }
 
 function insertAttemptReceipts(
@@ -206,17 +223,32 @@ export async function claimDeliveries(
   const expiresAt = now + CLAIM_LEASE_MS;
   const claimId = `clm_${crypto.randomUUID()}`;
   let rows: ClaimRow[];
+  let maintenancePending: boolean;
   try {
     const results = await env.DB.batch([
       convergeExpiredBundles(env.DB, now),
       convergeExhaustedAttempts(env.DB, now),
+      env.DB.prepare(`SELECT ${expiredPendingExists("?1")} AS pending`).bind(now - R2_RETENTION_MS),
       claimDeliveryPage(env.DB, now, claimId, expiresAt, limit),
       insertAttemptReceipts(env.DB, claimId, now, expiresAt),
       loadClaimedBundles(env.DB, claimId),
     ]);
     rows = (results.at(-1)?.results ?? []) as unknown as ClaimRow[];
+    maintenancePending = Number((results[2].results[0] as { pending: number }).pending) === 1;
   } catch {
     throw new HttpError(503, "storage_unavailable", "BazaarDB claim transaction failed", true);
+  }
+
+  if (maintenancePending) {
+    logEvent("bazaardb.maintenance", { request_id: requestId, has_more: true });
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      "Delivery maintenance is catching up",
+      true,
+      undefined,
+      { "Retry-After": "1" },
+    );
   }
 
   if (rows.length === 0) {
@@ -415,9 +447,9 @@ export async function settleDeliveries(
   let receipts: ReceiptRow[];
   try {
     writes = await env.DB.batch(statements);
-    const queries = input.results.map((result) =>
-      env.DB.prepare(
-        `SELECT
+    const found = await env.DB.prepare(
+      `SELECT
+           a.bundle_id,
            a.claim_id,
            a.outcome,
            a.reason,
@@ -426,13 +458,17 @@ export async function settleDeliveries(
            d.claimable_at_ms
          FROM bazaardb_delivery_attempts AS a
          JOIN bazaardb_deliveries AS d ON d.bundle_id = a.bundle_id
-         WHERE a.claim_id = ?1 AND a.bundle_id = ?2`,
-      ).bind(input.claimId, result.bundleId),
-    );
-    const found = await env.DB.batch<ReceiptRow>(queries);
-    receipts = found.map(
+         WHERE a.claim_id = ?1 AND a.bundle_id IN (
+           ${input.results.map((_, index) => `?${index + 2}`).join(", ")}
+         )`,
+    )
+      .bind(input.claimId, ...input.results.map((result) => result.bundleId))
+      .all<ReceiptRow>();
+    const byBundle = new Map(found.results.map((row) => [row.bundle_id, row]));
+    receipts = input.results.map(
       (result) =>
-        (result.results?.[0] as ReceiptRow | undefined) ?? {
+        byBundle.get(result.bundleId) ?? {
+          bundle_id: result.bundleId,
           claim_id: null,
           outcome: null,
           reason: null,

@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2026-08-02"
 workers_dev = false
 
+[triggers]
+crons = ["*/15 * * * *"]
+
 [placement]
 region = "aws:ap-east-1"
 

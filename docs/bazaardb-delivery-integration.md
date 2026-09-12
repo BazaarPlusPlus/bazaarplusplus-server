@@ -185,7 +185,7 @@ Per-item `status`:
 - `duplicate` — the same attempt was already settled with the same outcome and reason (safe: retries of a lost settle response are idempotent);
 - `stale_claim` — the lease expired or another claim now owns the Bundle; the item was not applied and will be re-delivered if attempts remain;
 - `outcome_conflict` — this attempt was already settled with a different outcome or reason;
-- `unknown_item` — the Bundle was never part of this claim.
+- `unknown_item` — no receipt exists for this claim and Bundle, including receipts pruned with the Bundle after the 15-day metadata retention window.
 
 `state` is the delivery's current state (`pending` / `done` / `failed`; `null` for an unknown item). `next_claim_at_ms` is non-null only for pending work without an active lease and indicates when the Bundle becomes claimable again.
 
@@ -200,9 +200,11 @@ Delivery is **at-least-once within at most 3 claims**; BazaarDB should deduplica
 | 401 | `unauthorized` | Invalid or missing bearer token | Verify the credential |
 | 403 | `insufficient_scope` | Token belongs to a different service scope | Use the delivery token |
 | 500 | `internal_error` | Unclassified server error | Retry with backoff; report `request_id` if persistent |
-| 503 | `storage_unavailable` | Temporary server-side failure | Retry with exponential backoff |
+| 503 | `storage_unavailable` | Temporary server-side failure or bounded expiry maintenance catching up | Retry with exponential backoff, respecting `Retry-After` when present |
 
 There is no `409` on this API. The `retryable` flag in the error envelope indicates whether a retry can succeed without changing the request.
+
+After a prolonged outage, claim may return `503` with `Retry-After: 1` while processing expired pending Bundles in batches. Each such response preserves cleanup progress without creating a claim or consuming a delivery attempt. Keep retrying with backoff; treat only a successful empty `items` response as the end of a pull round.
 
 ## Recommended Pull Job
 
@@ -397,6 +399,7 @@ The complete manifest JSON Schema is inlined in the appendix at the end of this 
 - Screenshot delivery is strictly **opt-in**: the mod includes the end-of-run Screenshot in the uploaded Bundle only while the player has BazaarDB upload enabled, and only Screenshot-bearing Bundles are delivered to BazaarDB.
 - A delivery exposes exactly the Bundle contents described above — the player identity as shown in game, the structured run record, and the end-of-run image. Nothing else is collected for this integration.
 - Bundles are retained on the BazaarPlusPlus side for **8 days** from upload, after which they are removed by a storage lifecycle rule. Settling a delivery does not delete the Bundle. A delivery still pending when its Bundle passes retention is marked failed with `failure_reason: "bundle_expired"` and is never handed out; under the recommended pull cadence this only occurs after a multi-day outage on the BazaarDB side.
+- Bundle metadata, delivery state, and attempt receipts are eligible for automatic D1 deletion **15 days** after Bundle storage. Settlement does not restart this clock. Retries after metadata deletion return `unknown_item`; keep BazaarDB's own deduplication records for its required retention period.
 
 ## Changes from the V4 Integration
 

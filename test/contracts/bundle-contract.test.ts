@@ -90,7 +90,6 @@ describe("Bundle V5 wire validation", () => {
       runId: "contract-length-run",
     });
     const shortHeaders = new Headers(fixture.headers);
-    shortHeaders.set("Content-Length", String(fixture.body.byteLength + 1));
     const shortBodyEnv = {
       ...env,
       BUNDLE_BUCKET: {
@@ -107,7 +106,7 @@ describe("Bundle V5 wire validation", () => {
         },
       },
     } as unknown as Cloudflare.Env;
-    expect(await errorFor(fixture.body, shortHeaders, shortBodyEnv)).toMatchObject({
+    expect(await errorFor(fixture.body.subarray(0, -1), shortHeaders, shortBodyEnv)).toMatchObject({
       status: 400,
       code: "invalid_content_length",
     });

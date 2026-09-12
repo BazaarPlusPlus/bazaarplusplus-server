@@ -367,6 +367,12 @@ function validateManifest(
 
   const payloadBytes = runLength + (screenshot?.length ?? 0);
   const describedBytes = BUNDLE_PREFIX_BYTES + bytes.byteLength + payloadBytes;
+  if (describedBytes < declaredObjectBytes) {
+    throw invalidBundle("undeclared_trailing_bytes", "Bundle has undeclared trailing bytes");
+  }
+  if (describedBytes > declaredObjectBytes) {
+    throw invalidBundle("segment_out_of_bounds", "A segment extends beyond the Bundle body");
+  }
   if (createdAtMs > 8_640_000_000_000_000) {
     throw invalidBundle(
       "manifest_schema_invalid",
@@ -483,12 +489,6 @@ function validateBundleBody(
             false,
           );
         }
-        if (descriptor.describedObjectBytes < descriptor.objectBytes) {
-          throw invalidBundle("undeclared_trailing_bytes", "Bundle has undeclared trailing bytes");
-        }
-        if (descriptor.describedObjectBytes > descriptor.objectBytes) {
-          throw invalidBundle("segment_out_of_bounds", "A segment extends beyond the Bundle body");
-        }
         await Promise.all([
           bundleWriter.close(),
           ...segmentDigests.map(({ writer }) => writer.close()),
@@ -534,18 +534,22 @@ export async function openBundle(
   expectedDigest: string | null,
 ): Promise<OpenedBundle> {
   const reader = createBodyReader(source);
-  const prefix = await reader.readExactly(BUNDLE_PREFIX_BYTES);
-  const { manifestLength } = parseBundlePrefix(prefix);
-  if (BUNDLE_PREFIX_BYTES + manifestLength >= contentLength) {
-    await reader.cancel("manifest leaves no Run segment");
-    throw invalidBundle("run_missing", "Bundle Run segment is missing");
+  try {
+    const prefix = await reader.readExactly(BUNDLE_PREFIX_BYTES);
+    const { manifestLength } = parseBundlePrefix(prefix);
+    if (BUNDLE_PREFIX_BYTES + manifestLength >= contentLength) {
+      throw invalidBundle("run_missing", "Bundle Run segment is missing");
+    }
+    const manifest = await reader.readExactly(manifestLength);
+    const descriptor = validateManifest(manifest, contentLength);
+    const validation = validateBundleBody(
+      streamWithPrelude(prefix, manifest, reader.remainder()),
+      descriptor,
+      expectedDigest,
+    );
+    return { descriptor, ...validation };
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
   }
-  const manifest = await reader.readExactly(manifestLength);
-  const descriptor = validateManifest(manifest, contentLength);
-  const validation = validateBundleBody(
-    streamWithPrelude(prefix, manifest, reader.remainder()),
-    descriptor,
-    expectedDigest,
-  );
-  return { descriptor, ...validation };
 }
