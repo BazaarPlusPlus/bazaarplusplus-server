@@ -35,7 +35,6 @@ export interface ValidatedBundleDescriptor {
   createdAtMs: number;
   manifestBytes: number;
   objectBytes: number;
-  describedObjectBytes: number;
   objectKey: string;
   run: { offset: number; length: number; sha256: string };
   screenshot: null | {

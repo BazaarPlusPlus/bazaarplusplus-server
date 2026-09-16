@@ -12,6 +12,19 @@ import {
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
+interface BundleCollectionItem {
+  bundle_id: string;
+  available_at_ms: number;
+  download_url: string;
+  download_expires_at_ms: number;
+}
+
+export interface BundleCollectionPage {
+  window: { available_from_ms: number; available_before_ms: number };
+  items: BundleCollectionItem[];
+  next_after: { available_at_ms: number; bundle_id: string } | null;
+}
+
 interface CollectionRow {
   bundle_id: string;
   available_at_ms: number;
@@ -50,7 +63,7 @@ export async function collectBundles(
   env: Env,
   requestId: string,
   deps: HandlerDeps,
-): Promise<Record<string, unknown>> {
+): Promise<BundleCollectionPage> {
   const url = new URL(request.url);
   const allowed = new Set([
     "available_from_ms",
@@ -141,12 +154,14 @@ export async function collectBundles(
     now,
     "Bundle URL signing failed",
   );
-  const items = returned.map((row, index) => ({
-    bundle_id: row.bundle_id,
-    available_at_ms: row.available_at_ms,
-    download_url: downloads[index].url,
-    download_expires_at_ms: downloads[index].expiresAtMs,
-  }));
+  const items = returned.map(
+    (row, index): BundleCollectionItem => ({
+      bundle_id: row.bundle_id,
+      available_at_ms: row.available_at_ms,
+      download_url: downloads[index].url,
+      download_expires_at_ms: downloads[index].expiresAtMs,
+    }),
+  );
   const last = returned.at(-1);
   logEvent("bundle.collection", {
     request_id: requestId,

@@ -23,7 +23,7 @@ npx wrangler d1 time-travel info bazaarplusplus-mod-api-v5-db --json
 
 保留执行前的 Time Travel bookmark 和部署版本，并记录回滚所需的全库写入损失边界。确认没有其他脚本在修改 Ghost 或同时执行迁移；正常上传和十五分钟 Cron 保持运行。
 
-先读取[容量测量](ghost-summary-capacity-2026-09-12.json)。复测命令只输出聚合，不导出玩家正文或账号清单：
+先读取[迁移前旧表容量测量](ghost-summary-capacity-2026-09-12.json)。以下复测命令仅适用于仍保留旧 `ghost_battles` 表的迁移前数据库；只输出聚合，不导出玩家正文或账号清单：
 
 ```sh
 node scripts/ghost-projection/capacity.mjs --remote --output /tmp/ghost-capacity.json

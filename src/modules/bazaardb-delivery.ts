@@ -16,6 +16,32 @@ import {
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
+interface ClaimedBundle {
+  bundle_id: string;
+  run_id: string;
+  download_url: string;
+  download_expires_at_ms: number;
+  content_type: "application/x-bpp-bundle-v5";
+  sha256: string;
+}
+
+export type ClaimDeliveriesResponse =
+  | { claim_id: null; expires_at_ms: null; items: [] }
+  | { claim_id: string; expires_at_ms: number; items: ClaimedBundle[] };
+
+interface SettleDeliveryItem {
+  bundle_id: string;
+  status: "applied" | "duplicate" | "stale_claim" | "outcome_conflict" | "unknown_item";
+  state: "pending" | "done" | "failed" | null;
+  next_claim_at_ms: number | null;
+}
+
+export interface SettleDeliveriesResponse {
+  claim_id: string;
+  items: SettleDeliveryItem[];
+  summary: { applied: number; duplicate: number; rejected: number };
+}
+
 interface ClaimRow {
   bundle_id: string;
   run_id: string;
@@ -213,7 +239,7 @@ export async function claimDeliveries(
   env: Env,
   requestId: string,
   deps: HandlerDeps,
-): Promise<Record<string, unknown>> {
+): Promise<ClaimDeliveriesResponse> {
   const body = await readJsonObject(request);
   const limit = claimLimit(body.limit);
   // Read the signer before the D1 claim batch: an invalid presign configuration
@@ -261,14 +287,16 @@ export async function claimDeliveries(
       now,
       "BazaarDB claim URL signing failed",
     );
-    const items = rows.map((row, index) => ({
-      bundle_id: row.bundle_id,
-      run_id: row.run_id,
-      download_url: downloads[index].url,
-      download_expires_at_ms: downloads[index].expiresAtMs,
-      content_type: "application/x-bpp-bundle-v5",
-      sha256: row.bundle_sha256,
-    }));
+    const items = rows.map(
+      (row, index): ClaimedBundle => ({
+        bundle_id: row.bundle_id,
+        run_id: row.run_id,
+        download_url: downloads[index].url,
+        download_expires_at_ms: downloads[index].expiresAtMs,
+        content_type: "application/x-bpp-bundle-v5",
+        sha256: row.bundle_sha256,
+      }),
+    );
     logEvent("bazaardb.claim", {
       request_id: requestId,
       claim_id: claimId,
@@ -435,7 +463,7 @@ export async function settleDeliveries(
   env: Env,
   requestId: string,
   deps: HandlerDeps,
-): Promise<Record<string, unknown>> {
+): Promise<SettleDeliveriesResponse> {
   const input = parseSettle(await readJsonObject(request));
   const now = deps.now();
   const pairs = input.results.map((result, index) =>
@@ -484,9 +512,9 @@ export async function settleDeliveries(
   let applied = 0;
   let duplicate = 0;
   let rejected = 0;
-  const items = input.results.map((result, index) => {
+  const items = input.results.map((result, index): SettleDeliveryItem => {
     const receipt = receipts[index];
-    let status: "applied" | "duplicate" | "stale_claim" | "outcome_conflict" | "unknown_item";
+    let status: SettleDeliveryItem["status"];
     if (receipt.claim_id === null) {
       status = "unknown_item";
       rejected += 1;

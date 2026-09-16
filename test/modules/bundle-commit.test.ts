@@ -11,6 +11,16 @@ import { bundleData } from "../fixtures/bundle";
 const TIMES = { availableAtMs: 1_785_628_900_000, storedAtMs: 1_785_628_899_000 };
 
 describe("bundle commit", () => {
+  test("returns no existing outcome when both Bundle and Run identities are absent", async () => {
+    const data = await bundleData({
+      bundleId: "01J00000000000000000000410",
+      runId: "commit-absent-run",
+      battles: [],
+    });
+
+    await expect(inspectExistingBundle(env.DB, data.descriptor, data.digest)).resolves.toBeNull();
+  });
+
   test("commits a self-opponent Ghost projection", async () => {
     const data = await bundleData({
       bundleId: "01J00000000000000000000401",

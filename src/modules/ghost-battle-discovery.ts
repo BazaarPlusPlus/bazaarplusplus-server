@@ -8,6 +8,34 @@ import { GHOST_DEFAULT_LIMIT, GHOST_LOOKBACK_MS, GHOST_MAX_LIMIT } from "../limi
 import { logEvent } from "../observability";
 import { signDownloadPage } from "../presigner";
 
+interface GhostBattleSummary {
+  battle_id: string;
+  bundle_id: string;
+  recorded_at_ms: number;
+  is_final_battle: boolean;
+  day: number;
+  hour: number;
+  result: string;
+  winner_combatant_id: string | null;
+  player: {
+    account_id: string;
+    display_name: string;
+    hero_name: string | null;
+    rank: string | null;
+    rating: number | null;
+  };
+  opponent: {
+    account_id: string;
+    hero_name: string | null;
+  };
+  download_url: string;
+  download_expires_at_ms: number;
+}
+
+export interface GhostDiscoveryResponse {
+  battles: GhostBattleSummary[];
+}
+
 interface GhostRow {
   uploader_account_id: string;
   battle_id: string;
@@ -39,7 +67,7 @@ export async function discoverGhostBattles(
   env: Env,
   requestId: string,
   deps: HandlerDeps,
-): Promise<Record<string, unknown>> {
+): Promise<GhostDiscoveryResponse> {
   const rateLimitKey = request.headers.get("CF-Connecting-IP") ?? "unknown";
   let rateLimit: RateLimitOutcome;
   try {
@@ -124,7 +152,7 @@ export async function discoverGhostBattles(
     issuedAt,
     "Ghost Battle URL signing failed",
   );
-  const battles = rows.map((row, index) => {
+  const battles = rows.map((row, index): GhostBattleSummary => {
     return {
       battle_id: row.battle_id,
       bundle_id: row.bundle_id,

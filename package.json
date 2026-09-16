@@ -16,7 +16,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "aws4fetch": "^1.0.20"
+    "aws4fetch": "^1.0.20",
+    "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.6",

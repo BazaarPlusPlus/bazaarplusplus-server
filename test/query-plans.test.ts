@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { claimDeliveries, settleDeliveries } from "../src/modules/bazaardb-delivery";
 import { collectBundles } from "../src/modules/bundle-collection";
 import { discoverGhostBattles } from "../src/modules/ghost-battle-discovery";
+import { seedDeliveryBacklog } from "./fixtures/backlog";
 import { type RecordedD1Query, recordD1 } from "./fixtures/d1";
 import { createTestDeps } from "./fixtures/deps";
 
@@ -137,30 +138,11 @@ describe("schema query plans", () => {
 });
 
 test("keyset reads and empty expiry work stay bounded with a large live backlog", async () => {
-  await env.DB.prepare(`
-    WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 1999)
-    INSERT INTO bundles (
-      bundle_id, run_id, uploader_account_id, object_key, bundle_sha256,
-      bundle_version, manifest_bytes, object_bytes, client_created_at_ms,
-      stored_at_ms, available_at_ms, run_format_version, run_bytes, run_sha256, has_screenshot
-    )
-    SELECT printf('%026d', n), 'plan-' || n, 'plan-backlog',
-           'bundles/2026-08-02/' || printf('%026d', n) || '.bundle',
-           printf('%064d', 0), 5, 10, 100, ?1, ?1, ?1, 5, 10, printf('%064d', 0), 0
-    FROM seq
-  `)
-    .bind(AVAILABLE)
-    .run();
-  await env.DB.prepare(`
-    INSERT INTO bazaardb_deliveries (bundle_id, claimable_at_ms, created_at_ms, state_updated_at_ms)
-    SELECT bundle_id, ?1, ?2, ?2 FROM bundles WHERE uploader_account_id = 'plan-backlog'
-  `)
-    .bind(NOW + 60_000, AVAILABLE)
-    .run();
+  await seedDeliveryBacklog(env.DB, 2000, AVAILABLE, NOW + 60_000);
 
   const queries = recordD1(env.DB);
   const page = await collectBundles(
-    collectionRequest(String(1948).padStart(26, "0")),
+    collectionRequest(`01J9${String(1948).padStart(22, "0")}`),
     env,
     "cost-collection",
     deps(),
@@ -168,7 +150,7 @@ test("keyset reads and empty expiry work stay bounded with a large live backlog"
   expect(page.items).toHaveLength(50);
   expect(page.next_after).toEqual({
     available_at_ms: AVAILABLE,
-    bundle_id: String(1998).padStart(26, "0"),
+    bundle_id: `01J9${String(1998).padStart(22, "0")}`,
   });
   const collection = query(queries, /^SELECT .* FROM bundles /).result;
   expect(collection.results).toHaveLength(51);

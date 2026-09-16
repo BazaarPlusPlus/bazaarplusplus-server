@@ -1,6 +1,8 @@
 import { env } from "cloudflare:test";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { describe, expect, test } from "vitest";
 
+import { bundleIdentity } from "../src/db-schema";
 import { commitBundle } from "../src/modules/bundle-commit";
 import { bundleData } from "./fixtures/bundle";
 
@@ -24,6 +26,25 @@ test("the completed migrations leave only the V5 domain tables", async () => {
     "bundles",
     "ghost_battle_summaries",
   ]);
+});
+
+test("the Drizzle identity projection matches the migrated Bundle columns", async () => {
+  const table = getTableConfig(bundleIdentity);
+  const result = await env.DB.prepare("PRAGMA table_info(bundles)").all<{
+    name: string;
+    type: string;
+    notnull: number;
+  }>();
+  const columns = new Map(result.results.map((column) => [column.name, column]));
+
+  expect(table.name).toBe("bundles");
+  for (const column of table.columns) {
+    expect(columns.get(column.name)).toMatchObject({
+      name: column.name,
+      type: column.getSQLType().toUpperCase(),
+      notnull: Number(column.notNull),
+    });
+  }
 });
 
 describe("V5 relational constraints", () => {
