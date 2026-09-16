@@ -172,7 +172,8 @@ export async function ingestBundle(
   let existing: CommitOutcome | null;
   try {
     existing = await inspectExistingBundle(env.DB, descriptor, digest);
-  } catch {
+  } catch (error) {
+    await opened.body.cancel(error).catch(() => undefined);
     throw new HttpError(503, "storage_unavailable", "Bundle index is unavailable", true);
   }
   if (existing?.kind === "duplicate") {
@@ -180,7 +181,9 @@ export async function ingestBundle(
     return { status: 200, receipt: existing.receipt };
   }
   if (existing?.kind === "conflict") {
-    throw conflictError(existing.reason);
+    const error = conflictError(existing.reason);
+    await opened.body.cancel(error).catch(() => undefined);
+    throw error;
   }
 
   const objectWrite = await putConditionally(env, opened, digest);

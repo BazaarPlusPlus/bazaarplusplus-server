@@ -15,6 +15,47 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("openBundle", () => {
+  test("cancels the source and rejects the digest with the caller's reason", async () => {
+    const bytes = decodeBase64(runOnlyBase64);
+    const manifestEnd = 16 + new DataView(bytes.buffer).getUint32(12, false);
+    const cancel = vi.fn();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, manifestEnd + 1));
+      },
+      cancel,
+    });
+    const opened = await openBundle(source, bytes.byteLength, null);
+    const reason = new Error("upload no longer needed");
+
+    await opened.body.cancel(reason);
+
+    await expect(opened.digest).rejects.toBe(reason);
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(reason);
+  });
+
+  test("rejects body and digest with the original source failure", async () => {
+    const bytes = decodeBase64(runOnlyBase64);
+    const manifestEnd = 16 + new DataView(bytes.buffer).getUint32(12, false);
+    const reason = new Error("upload disconnected");
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, manifestEnd + 1));
+      },
+      pull(controller) {
+        controller.error(reason);
+      },
+    });
+    const opened = await openBundle(source, bytes.byteLength, null);
+    const [bodyError, digestError] = await Promise.all([
+      rejection(opened.body.pipeTo(new WritableStream<Uint8Array>())),
+      rejection(opened.digest),
+    ]);
+
+    expect(bodyError).toBe(reason);
+    expect(digestError).toBe(reason);
+  });
+
   test.each([
     [1_048_576, "undeclared_trailing_bytes"],
     [-1, "segment_out_of_bounds"],
@@ -89,7 +130,6 @@ describe("openBundle", () => {
       createdAtMs: 1_785_628_800_000,
       manifestBytes: 374,
       objectBytes: 399,
-      describedObjectBytes: 399,
       objectKey: "bundles/2026-08-02/01J00000000000000000000901.bundle",
       run: {
         offset: 0,

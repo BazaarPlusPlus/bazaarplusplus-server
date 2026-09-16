@@ -22,6 +22,12 @@ The design is a small number of deep seams, recorded in [ADR 0001](docs/adr/0001
 - `src/modules/bundle-commit.ts` owns immutable-identity decisions and the atomic D1 commit, while `src/modules/bundle-ingest.ts` owns R2 orchestration and orphan recovery.
 - `src/modules/d1-retention.ts` owns scheduled D1 pruning by server storage time; foreign keys cascade to Ghost projections, deliveries, and attempt receipts.
 
+Bundle identity reads use Drizzle's D1 query builder with the column mapping in
+`src/db-schema.ts`, so selected fields and result types share one definition.
+Atomic writes and indexed delivery queries use native D1 statements. SQL files in
+`migrations/` remain the schema authority and are applied through Wrangler; the
+Drizzle mapping is a read projection, not an input to a migration generator.
+
 `test/` mirrors the `src/` layout (`http/`, `bundle/`, `modules/`), with golden-vector contract tests under `test/contracts/` and migration, schema, and root-module tests at the top level.
 
 ## Development
@@ -34,6 +40,11 @@ npm run dev     # wrangler dev; requires .dev.vars (below)
 ```
 
 `npm run format` rewrites files in place. `npm run dev` needs a git-ignored `.dev.vars` file supplying `R2_PRESIGN_SECRET_ACCESS_KEY`, `BUNDLE_SYNC_TOKEN`, and `BAZAARDB_DELIVERY_TOKEN`; the Worker fails closed without them. Tests inject their own values and need no `.dev.vars`.
+
+TypeScript checks application and test code in strict mode. `skipLibCheck` skips
+declaration-file checks because Drizzle's declarations reference optional database
+drivers outside this Worker's D1 runtime; query arguments and inferred results are
+still checked at their use sites.
 
 ## Production
 

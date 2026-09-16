@@ -20,6 +20,8 @@ function configuredTokensAreValid(env: Env): boolean {
   const sync = env.BUNDLE_SYNC_TOKEN;
   const delivery = env.BAZAARDB_DELIVERY_TOKEN;
   return (
+    typeof sync === "string" &&
+    typeof delivery === "string" &&
     sync.length === TOKEN_BYTES &&
     delivery.length === TOKEN_BYTES &&
     /^[A-Za-z0-9_-]{43}$/.test(sync) &&

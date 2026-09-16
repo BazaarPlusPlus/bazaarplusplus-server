@@ -141,17 +141,35 @@ describe("route shell", () => {
     expect(errorLog).not.toHaveBeenCalled();
   });
 
-  test("logs an invalid service token configuration on protected routes", async () => {
+  test.each([
+    { name: "malformed token", overrides: { BUNDLE_SYNC_TOKEN: "too-short" } },
+    { name: "missing Bundle Sync token", overrides: { BUNDLE_SYNC_TOKEN: undefined } },
+    { name: "missing BazaarDB token", overrides: { BAZAARDB_DELIVERY_TOKEN: undefined } },
+    {
+      name: "both tokens missing",
+      overrides: { BUNDLE_SYNC_TOKEN: undefined, BAZAARDB_DELIVERY_TOKEN: undefined },
+    },
+  ])("rejects and logs invalid service configuration: $name", async ({ overrides }) => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const fetch = handlerFor([
-      route("/protected", async () => ({ status: 200, body: {} }), { auth: "bundle_sync" }),
-    ]);
+    const handler = vi.fn(async () => ({ status: 200, body: {} }));
+    const createDeps = vi.fn();
+    const fetch = handlerFor([route("/protected", handler, { auth: "bundle_sync" })], createDeps);
 
     const response = await fetch(
       new Request("https://example.test/protected", { headers: { "CF-Ray": "config-ray" } }),
-      testEnv({ BUNDLE_SYNC_TOKEN: "too-short" }),
+      testEnv(overrides),
     );
     expect(response.status).toBe(500);
+    expect(response.headers.get("x-request-id")).toBe("config-ray");
+    expect(await response.json()).toEqual({
+      error: {
+        code: "internal_error",
+        message: "Service token configuration is invalid",
+        retryable: true,
+        request_id: "config-ray",
+      },
+    });
+    expect(errorLog).toHaveBeenCalledOnce();
     expect(errorLog).toHaveBeenCalledWith(
       JSON.stringify({
         event: "worker.http_error",
@@ -161,6 +179,8 @@ describe("route shell", () => {
         code: "invalid_configuration",
       }),
     );
+    expect(createDeps).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
   });
 
   test("applies route CORS to handler outcomes but not shell errors or non-CORS routes", async () => {

@@ -387,7 +387,6 @@ function validateManifest(
     createdAtMs,
     manifestBytes: bytes.byteLength,
     objectBytes: declaredObjectBytes,
-    describedObjectBytes: describedBytes,
     objectKey: `bundles/${day}/${root.bundle_id}.bundle`,
     run: { offset: runOffset, length: runLength, sha256: payload.sha256 },
     screenshot,
@@ -420,7 +419,7 @@ function validateBundleBody(
   }
 
   let position = 0;
-  let settled = false;
+  let failure: Promise<void> | undefined;
   let resolveDigest!: (digest: string) => void;
   let rejectDigest!: (error: unknown) => void;
   const digestResult = new Promise<string>((resolve, reject) => {
@@ -428,30 +427,16 @@ function validateBundleBody(
     rejectDigest = reject;
   });
   void digestResult.catch(() => undefined);
-  const fail = (error: unknown): void => {
-    if (!settled) {
-      settled = true;
+  const fail = (error: unknown): Promise<void> => {
+    if (failure === undefined) {
       rejectDigest(error);
+      failure = Promise.allSettled([
+        bundleWriter.abort(error),
+        ...segmentDigests.map(({ writer }) => writer.abort(error)),
+      ]).then(() => undefined);
     }
+    return failure;
   };
-  const sourceReader = source.getReader();
-  const observedSource = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const result = await sourceReader.read();
-        if (result.done) controller.close();
-        else controller.enqueue(result.value);
-      } catch (error) {
-        fail(error);
-        controller.error(error);
-      }
-    },
-    async cancel(reason) {
-      fail(reason);
-      await sourceReader.cancel(reason);
-    },
-  });
-
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     async transform(chunk, controller) {
       try {
@@ -475,7 +460,7 @@ function validateBundleBody(
         position = nextPosition;
         controller.enqueue(chunk);
       } catch (error) {
-        fail(error);
+        await fail(error);
         throw error;
       }
     },
@@ -513,19 +498,18 @@ function validateBundleBody(
             false,
           );
         }
-        settled = true;
         resolveDigest(actual);
       } catch (error) {
-        fail(error);
+        await fail(error);
         throw error;
       }
     },
     cancel(reason) {
-      fail(reason);
+      return fail(reason);
     },
   });
 
-  return { body: observedSource.pipeThrough(transform), digest: digestResult };
+  return { body: source.pipeThrough(transform), digest: digestResult };
 }
 
 export async function openBundle(

@@ -1,10 +1,71 @@
 import { env } from "cloudflare:test";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import worker from "../../src/index";
 import { contentDigest, makeBundleFixture, uploadRequest } from "../fixtures/bundle";
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("Bundle ingest fault recovery", () => {
+  test.each([
+    ["index_failure", 503, "storage_unavailable", "01J00000000000000000000710"],
+    ["bundle_conflict", 409, "bundle_id_conflict", "01J00000000000000000000711"],
+    ["run_conflict", 409, "run_already_bundled", "01J00000000000000000000712"],
+    ["duplicate", 200, null, "01J00000000000000000000713"],
+  ] as const)("cancels the unread upload on %s", async (outcome, status, code, bundleId) => {
+    const original = await makeBundleFixture({
+      bundleId,
+      runId: `recovery-unread-${outcome}`,
+      uploaderAccountId: `recovery-unread-${outcome}`,
+      battles: [],
+    });
+    if (outcome !== "index_failure") {
+      expect((await worker.fetch(uploadRequest(original.body, original.headers), env)).status).toBe(
+        201,
+      );
+    }
+    const incoming =
+      outcome === "bundle_conflict" || outcome === "run_conflict"
+        ? await makeBundleFixture({
+            bundleId: outcome === "bundle_conflict" ? bundleId : "01J00000000000000000000714",
+            runId: `recovery-unread-${outcome}`,
+            uploaderAccountId: `recovery-unread-${outcome}`,
+            runBytes: new Uint8Array([1, 2, 3]),
+            battles: [],
+          })
+        : original;
+    const manifestEnd = 16 + new DataView(incoming.body.buffer).getUint32(12, false);
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(incoming.body.subarray(0, manifestEnd + 1));
+      },
+      cancel,
+    });
+    const put = vi.spyOn(env.BUNDLE_BUCKET, "put");
+    if (outcome === "index_failure") {
+      vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+        throw new Error("injected D1 read failure");
+      });
+    }
+
+    const response = await worker.fetch(
+      new Request("https://mod-api-v5.bazaarplusplus.com/bundles", {
+        method: "POST",
+        headers: incoming.headers,
+        body,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject(
+      code === null ? { outcome: "duplicate" } : { error: { code } },
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(put).not.toHaveBeenCalled();
+  });
+
   test("keeps an R2-only object after D1 failure and recovers it on retry", async () => {
     const fixture = await makeBundleFixture({
       bundleId: "01J00000000000000000000701",
